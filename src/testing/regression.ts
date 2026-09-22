@@ -16,6 +16,8 @@ import { templateBlog, emptyProject, uid } from '@/lib/builder';
 import { runValidationPipeline } from '@/validation/pipeline';
 import { runAllTests, simulateAutoloader, simulateMigrationExecution, simulateHttpDispatch, simulateE2EAuthFlow } from '@/testing/testRunner';
 import { auditSecurity } from '@/security/auditor';
+import { validateAuthRouteContract } from '@/security/authContract';
+import { runAllPermanentFixtures } from '@/testing/fixtures';
 
 export interface RegressionResult { name: string; passed: boolean; detail: string }
 
@@ -303,6 +305,34 @@ export function runRegressionTests(): RegressionResult[] {
     detail: authReport.passed
       ? `All 15 E2E auth steps passed (Register, Login, Token, /me, Guard, 401, Expire, Refresh, Migration, Revoke, Logout, Client Clear, Protected Guard, Redirect)`
       : authReport.errors.join('; '),
+  });
+
+  // 25. Invariant: AUTH_ROUTE_CONTRACT_MATCH — canonical routes unified across representations
+  const authContractCheck = validateAuthRouteContract(files, blog.auth, blog.config.apiPrefix);
+  out.push({
+    name: 'Canonical auth route contract matches Router, OpenAPI, Client, and Auth Store',
+    passed: authContractCheck.passed,
+    detail: authContractCheck.passed ? 'all representations match canonical contract' : authContractCheck.mismatches.join('; '),
+  });
+
+  // 26. Invariant: BUSINESS_CLASS_DI_ONLY — controllers resolved via Container DI
+  const frontSrcIndex = byPath('backend/public/index.php');
+  const hasDirectNewController = /\$router->add\([^)]*fn\([^)]*\)\s*=>\s*\(new\s+[A-Z]\w*Controller/i.test(frontSrcIndex);
+  const usesContainerForControllers = frontSrcIndex.includes('$c->get(AuthController::class)') && frontSrcIndex.includes('$c->get(PostController::class)');
+  out.push({
+    name: 'Route handlers use PSR-11 Container DI instead of direct controller instantiations',
+    passed: !hasDirectNewController && usesContainerForControllers,
+    detail: !hasDirectNewController && usesContainerForControllers ? 'Container DI wiring confirmed' : 'direct (new Controller) detected',
+  });
+
+  // 27. Invariant: PERMANENT_FIXTURES_A_THROUGH_J — all 10 fixtures pass
+  const fixtureResults = runAllPermanentFixtures();
+  const allFixturesPassed = fixtureResults.every((f) => f.passed);
+  const failedFixtures = fixtureResults.filter((f) => !f.passed).map((f) => f.fixture);
+  out.push({
+    name: 'Permanent regression fixtures A through J pass 100% of invariant checks',
+    passed: allFixturesPassed,
+    detail: allFixturesPassed ? 'All 10 fixtures (A-J) passed 100%' : `Failed fixtures: ${failedFixtures.join(', ')}`,
   });
 
   return out;
