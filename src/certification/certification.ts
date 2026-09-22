@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Application Certification Report (Production-Grade 10/10 Architecture)
  *
  * Weighted Scoring:
@@ -24,6 +24,8 @@ import type { BuilderState, GenFile } from '@/lib/builder';
 import type { SecurityFinding, TestResult } from '@/shared/types';
 import type { ValidationResult } from '@/validation/pipeline';
 import type { RegressionResult } from '@/testing/regression';
+import { validateRouteIntegrity } from '@/security/authContract';
+import { buildApplicationDependencyGraph, validateSystemMapGraph } from '@/graph/dependencyGraph';
 
 export interface CategoryScore {
   weight: number;
@@ -78,7 +80,11 @@ export function generateCertificationReport(input: {
   if (!hasEnv) { archScore -= 20; archDetails.push('Env.php loader missing'); }
   if (!hasFront) { archScore -= 30; archDetails.push('Front controller missing'); }
   if (!noGlobals) { archScore -= 40; archDetails.push("Legacy $GLOBALS['__pdo'] detected"); }
-  if (archScore === 100) archDetails.push('PSR-4, Container DI, and zero global state verified');
+  const noGlobalReqId = !generated.some((f) => f.content.includes("$GLOBALS['__request_id']"));
+  if (!noGlobalReqId) { archScore -= 30; archDetails.push("Mutable $GLOBALS['__request_id'] detected — must use RequestContext"); hardFloorReasons.push("$GLOBALS['__request_id'] present in generated code"); }
+  const hasRequestContext = generated.some((f) => f.path === 'backend/support/RequestContext.php');
+  if (!hasRequestContext) { archScore -= 10; archDetails.push('RequestContext.php missing'); }
+  if (archScore === 100) archDetails.push('PSR-4, Container DI, RequestContext, and zero global state verified');
 
   // 2. Schema (10%)
   const schemaSql = byPath('database/schema.sql');
@@ -116,7 +122,7 @@ export function generateCertificationReport(input: {
   // 5. Authz (10%)
   let authzScore = 100;
   const authzDetails: string[] = [];
-  const ownedTables = builder.tables.filter((t) => t.columns.some((c) => ['user_id', 'owner_id'].includes(c.name)));
+  const ownedTables = builder.tables.filter((t) => t.columns.some((c) => ['user_id', 'owner_id', 'created_by', 'author_id', 'customer_id', 'account_id', 'member_id'].includes(c.name)));
   if (ownedTables.length > 0) {
     const hasIdor = controllers.some((c) => c.content.includes('Access denied: you do not own this resource'));
     if (!hasIdor) {
@@ -198,6 +204,24 @@ export function generateCertificationReport(input: {
   // Check validation pipeline hard floor
   if (validation.blocking) {
     hardFloorReasons.push(`Validation pipeline blocked: ${validation.issues.filter((i) => i.severity === 'blocking').map((i) => i.code).join(', ')}`);
+  }
+
+  // Route-controller integrity hard floor
+  const routeIntegrity = validateRouteIntegrity(generated);
+  if (!routeIntegrity.passed) {
+    hardFloorReasons.push(`Route-controller integrity failed: ${routeIntegrity.errors.join('; ')}`);
+  }
+
+  // Dependency graph hard floor
+  const depGraph = buildApplicationDependencyGraph(builder);
+  const graphValidation = validateSystemMapGraph(depGraph, builder);
+  if (!graphValidation.passed) {
+    hardFloorReasons.push(`Dependency graph invariants failed: ${graphValidation.errors.join('; ')}`);
+  }
+
+  // JWT-MySQL edge hard floor (CRITICAL: JWT must NEVER connect to MySQL directly)
+  if (depGraph.hasEdge('jwt', 'mysql')) {
+    hardFloorReasons.push('CRITICAL DEFECT: JWT provider directly connects to MySQL — JWT must remain database-independent');
   }
 
   // Calculate raw weighted score

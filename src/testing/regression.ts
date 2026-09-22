@@ -16,8 +16,9 @@ import { templateBlog, emptyProject, uid } from '@/lib/builder';
 import { runValidationPipeline } from '@/validation/pipeline';
 import { runAllTests, simulateAutoloader, simulateMigrationExecution, simulateHttpDispatch, simulateE2EAuthFlow } from '@/testing/testRunner';
 import { auditSecurity } from '@/security/auditor';
-import { validateAuthRouteContract } from '@/security/authContract';
+import { validateAuthRouteContract, validateRouteIntegrity as checkRouteIntegrity } from '@/security/authContract';
 import { runAllPermanentFixtures } from '@/testing/fixtures';
+import { buildApplicationDependencyGraph as buildDependencyGraph, validateSystemMapGraph as validateGraph } from '@/graph/dependencyGraph';
 
 export interface RegressionResult { name: string; passed: boolean; detail: string }
 
@@ -297,13 +298,13 @@ export function runRegressionTests(): RegressionResult[] {
     detail: missingRules.length > 0 ? `missing rules: ${missingRules.join(',')}` : criticalOpen.length > 0 ? `critical open: ${criticalOpen.map((f) => f.ruleId).join(',')}` : `${blogFindings.length} findings, all 8 rules covered, 0 critical/open`,
   });
 
-  // 24. Authentication E2E lifecycle (15 steps)
+  // 24. Authentication E2E lifecycle (18 steps)
   const authReport = simulateE2EAuthFlow(files, blogReqs);
   out.push({
-    name: '15-step E2E authentication flow verifies complete end-to-end lifecycle',
+    name: '18-step E2E authentication flow verifies complete end-to-end lifecycle',
     passed: authReport.passed,
     detail: authReport.passed
-      ? `All 15 E2E auth steps passed (Register, Login, Token, /me, Guard, 401, Expire, Refresh, Migration, Revoke, Logout, Client Clear, Protected Guard, Redirect)`
+      ? `All 18 E2E auth steps passed (Register, Login, Token, Claims, /me, Guard, 401, Expire, Refresh, Migration, Revoke, Logout, Client, Protected, Redirect, Role, IDOR, RequestContext)`
       : authReport.errors.join('; '),
   });
 
@@ -317,7 +318,7 @@ export function runRegressionTests(): RegressionResult[] {
 
   // 26. Invariant: BUSINESS_CLASS_DI_ONLY — controllers resolved via Container DI
   const frontSrcIndex = byPath('backend/public/index.php');
-  const hasDirectNewController = /\$router->add\([^)]*fn\([^)]*\)\s*=>\s*\(new\s+[A-Z]\w*Controller/i.test(frontSrcIndex);
+  const hasDirectNewController = /\$router-\>add\([^)]*fn\([^)]*\)\s*=>\s*\(new\s+[A-Z]\w*Controller/i.test(frontSrcIndex);
   const usesContainerForControllers = frontSrcIndex.includes('$c->get(AuthController::class)') && frontSrcIndex.includes('$c->get(PostController::class)');
   out.push({
     name: 'Route handlers use PSR-11 Container DI instead of direct controller instantiations',
@@ -333,6 +334,38 @@ export function runRegressionTests(): RegressionResult[] {
     name: 'Permanent regression fixtures A through J pass 100% of invariant checks',
     passed: allFixturesPassed,
     detail: allFixturesPassed ? 'All 10 fixtures (A-J) passed 100%' : `Failed fixtures: ${failedFixtures.join(', ')}`,
+  });
+
+  // 28. NO_GLOBAL_REQUEST_ID — zero $GLOBALS['__request_id'] in all generated files
+  const globalReqIdFiles = files.filter((f) => f.content.includes("$GLOBALS['__request_id']"));
+  out.push({
+    name: "Generated code contains zero $GLOBALS['__request_id'] references",
+    passed: globalReqIdFiles.length === 0,
+    detail: globalReqIdFiles.length === 0
+      ? 'clean — request-scoped via RequestContext only'
+      : `found in ${globalReqIdFiles.map((f) => f.path).join(', ')}`,
+  });
+
+  // 29. SYSTEM_MAP_AUTH_GRAPH_INVARIANTS — dependency graph nodes, edges, JWT-MySQL isolation
+  const depGraph = buildDependencyGraph(blog);
+  const graphCheck = validateGraph(depGraph, blog);
+  const jwtMysqlClean = !depGraph.hasEdge('jwt', 'mysql');
+  out.push({
+    name: 'System map dependency graph invariants pass (nodes, edges, JWT ≠ MySQL)',
+    passed: graphCheck.passed && jwtMysqlClean,
+    detail: graphCheck.passed && jwtMysqlClean
+      ? `hasNode(jwt)=${depGraph.hasNode('jwt')}, hasNode(users)=${depGraph.hasNode('users')}, !hasEdge(jwt,mysql)=${jwtMysqlClean}`
+      : graphCheck.errors.concat(jwtMysqlClean ? [] : ['JWT has direct MySQL edge']).join('; '),
+  });
+
+  // 30. ROUTE_CONTROLLER_METHOD_INTEGRITY — every route points to existing controller and method
+  const routeCheck = checkRouteIntegrity(files);
+  out.push({
+    name: 'Every registered route resolves to existing controller class and action method',
+    passed: routeCheck.passed,
+    detail: routeCheck.passed
+      ? 'all routes resolve to real controllers/methods'
+      : routeCheck.errors.join('; '),
   });
 
   return out;

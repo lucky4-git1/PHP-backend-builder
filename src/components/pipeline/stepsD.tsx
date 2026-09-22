@@ -17,6 +17,7 @@ import { runValidationPipeline } from '@/validation/pipeline';
 import { runRegressionTests } from '@/testing/regression';
 import { applyRemediation, canRemediateFinding } from '@/security/remediator';
 import { generateCertificationReport } from '@/certification/certification';
+import { buildApplicationDependencyGraph } from '@/graph/dependencyGraph';
 import type { BuilderState, GenFile } from '@/lib/builder';
 import type { SecurityFinding } from '@/shared/types';
 
@@ -379,14 +380,9 @@ export function StepArchitecture() {
   const b = p.builder;
   if (!b) return <Card><CardContent className="p-6 text-sm text-muted-foreground">Generate first.</CardContent></Card>;
 
-  const tables = b.tables.map((t) => t.name);
-  const dot = [
-    'graph TD',
-    '  FE["Frontend (original + api-client)"] --> API["PHP API ' + (b.config.apiPrefix || '/api/v1') + '"]',
-    '  API --> AUTH["Auth (JWT)"]',
-    ...tables.slice(0, 10).map((t, i) => `  API --> T${i}["${t} controller + model"]\n  T${i} --> DB[("MySQL ${b.config.dbName}")]`),
-    tables.length === 0 ? '  API --> DB[("MySQL")]' : '',
-  ].join('\n');
+  const dot = useMemo(() => {
+    return buildApplicationDependencyGraph(b, p.generated).toMermaid();
+  }, [b, p.generated]);
 
   const s = summarizeTests(p.tests);
   const sum = summarizeFindings(p.security);

@@ -779,12 +779,47 @@ export function simulateE2EAuthFlow(
     evidence: redirectsToLogin ? 'Redirects to login.html?redirect={currentPath}' : 'Redirect parameter missing',
   });
 
+  // Step 16: Role claim encoded in JWT payload
+  const hasRoleClaim = /'role'\s*=>/.test(authCtrlSrc) && /issueTokens\(\$[a-zA-Z]+,\s*\$role/i.test(authCtrlSrc);
+  steps.push({
+    step: 16,
+    name: 'JWT payload includes role claim from user record',
+    passed: hasRoleClaim,
+    evidence: hasRoleClaim ? 'role claim encoded in Jwt::encode via issueTokens($id, $role, ...)' : 'Missing role in JWT payload',
+  });
+
+  // Step 17: IDOR ownership enforcement in controllers
+  const hasIdorCheck = generated.some((f) => {
+    const c = contentOf(f);
+    return pathOf(f).includes('Controller.php') && c.includes('Access denied: you do not own this resource') && /\$existing\[['"]user_id['"]\]/.test(c);
+  });
+  steps.push({
+    step: 17,
+    name: 'IDOR ownership enforcement present in controllers with user_id columns',
+    passed: hasIdorCheck,
+    evidence: hasIdorCheck ? 'Ownership check + 403 present in resource controllers' : 'IDOR protection missing from controllers',
+  });
+
+  // Step 18: Zero $GLOBALS['__request_id'] — uses RequestContext instead
+  const globalsUsed = generated.filter((f) => contentOf(f).includes("$GLOBALS['__request_id']"));
+  const noGlobals = globalsUsed.length === 0;
+  const usesContext = frontSrc.includes('RequestContext') || authCtrlSrc.includes('$req->context()->requestId');
+  const step18ok = noGlobals && usesContext;
+  steps.push({
+    step: 18,
+    name: 'Zero $GLOBALS request state — uses request-scoped RequestContext',
+    passed: step18ok,
+    evidence: step18ok
+      ? 'No $GLOBALS[\'__request_id\'] found; RequestContext in use'
+      : `${globalsUsed.length} files still use $GLOBALS: ${globalsUsed.map((f) => pathOf(f)).join(', ')}`,
+  });
+
   for (const s of steps) {
     if (!s.passed) errors.push(`Step ${s.step} failed: ${s.name} (${s.evidence})`);
   }
 
   return {
-    passed: errors.length === 0 && steps.length === 15,
+    passed: errors.length === 0 && steps.length === 18,
     steps,
     errors,
   };

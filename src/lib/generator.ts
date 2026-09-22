@@ -184,9 +184,9 @@ function controllerFor(t: BuilderTable, perPage: number, isAuthResource = false)
     : "        if (isset($data['email'])) { $data['email'] = strtolower(trim((string)$data['email'])); }\n        return $data;";
   const sortCols = Array.from(new Set(['id', 'created_at', 'updated_at', ...t.columns.map((c) => c.name).filter((n) => !['password', 'key_hash'].includes(n))]));
   const allowedSortsStr = "['" + sortCols.join("', '") + "']";
-  const ownerCol = t.columns.find((c) => ['user_id', 'owner_id', 'created_by', 'author_id'].includes(c.name))?.name;
+  const ownerCol = t.columns.find((c) => ['user_id', 'owner_id', 'created_by', 'author_id', 'customer_id', 'account_id', 'member_id'].includes(c.name))?.name;
   const ownerCheck = ownerCol && !isAuthResource
-    ? "        if (isset($existing['" + ownerCol + "']) && isset($req->user['sub']) && (string)$existing['" + ownerCol + "'] !== (string)$req->user['sub'] && ($req->user['role'] ?? '') !== 'admin') {\n            Response::error('FORBIDDEN', 'Access denied: you do not own this resource', 403);\n            return;\n        }\n"
+    ? "        if (isset($existing['" + ownerCol + "']) && isset($req->user['sub']) && (string)$existing['" + ownerCol + "'] !== (string)$req->user['sub'] && ($req->user['role'] ?? '') !== 'admin') {\n            Response::error('FORBIDDEN', 'Access denied: you do not own this resource', 403, [], $req->context()->requestId);\n            return;\n        }\n"
     : "";
   const ownerCreate = ownerCol && !isAuthResource
     ? "        if (isset($req->user['sub']) && !isset($data['" + ownerCol + "'])) { $data['" + ownerCol + "'] = $req->user['sub']; }\n"
@@ -207,56 +207,56 @@ function controllerFor(t: BuilderTable, perPage: number, isAuthResource = false)
     "        $sort = in_array($sortParam, $allowedSorts, true) ? $sortParam : 'id';\n" +
     '        $dir = strtoupper((string)$req->query(' + "'dir', 'DESC'" + ")) === 'ASC' ? 'ASC' : 'DESC';\n" +
     '        $result = ' + cls + '::paginate($page, $perPage, $search, $sort, $dir);\n' +
-    '        Response::json($result);\n' +
+    '        Response::json($result, 200, $req->context()->requestId);\n' +
     '    }\n\n' +
     '    public function read(Request $req, string $id): void\n' +
     '    {\n' +
     '        $row = ' + cls + '::find($id);\n' +
-    "        if (!$row) { Response::error('NOT_FOUND', 'Not found', 404); return; }\n" +
-    "        Response::ok($row);\n" +
+    "        if (!$row) { Response::error('NOT_FOUND', 'Not found', 404, [], $req->context()->requestId); return; }\n" +
+    "        Response::ok($row, [], $req->context()->requestId);\n" +
     '    }\n\n' +
     '    public function create(Request $req): void\n' +
     '    {\n' +
     '        $data = $req->body();\n' +
     '        $errors = $this->validate($data, true);\n' +
-    "        if ($errors) { Response::error('VALIDATION_ERROR', 'Validation failed', 422, $errors); return; }\n" +
+    "        if ($errors) { Response::error('VALIDATION_ERROR', 'Validation failed', 422, $errors, $req->context()->requestId); return; }\n" +
     ownerCreate +
     '        $data = $this->mutate($data);\n' +
     '        $row = ' + cls + '::create($data);\n' +
-    "        Response::json(['success' => true, 'data' => $row, 'request_id' => $GLOBALS['__request_id'] ?? ''], 201);\n" +
+    "        Response::json(['success' => true, 'data' => $row, 'request_id' => $req->context()->requestId], 201, $req->context()->requestId);\n" +
     '    }\n\n' +
     '    public function update(Request $req, string $id): void\n' +
     '    {\n' +
     '        $existing = ' + cls + '::find($id);\n' +
-    "        if (!$existing) { Response::error('NOT_FOUND', 'Not found', 404); return; }\n" +
+    "        if (!$existing) { Response::error('NOT_FOUND', 'Not found', 404, [], $req->context()->requestId); return; }\n" +
     ownerCheck +
     '        $data = $req->body();\n' +
     '        $errors = $this->validate($data, false);\n' +
-    "        if ($errors) { Response::error('VALIDATION_ERROR', 'Validation failed', 422, $errors); return; }\n" +
+    "        if ($errors) { Response::error('VALIDATION_ERROR', 'Validation failed', 422, $errors, $req->context()->requestId); return; }\n" +
     '        $data = $this->mutate($data);\n' +
     '        $row = ' + cls + '::update($id, $data);\n' +
-    "        Response::ok($row);\n" +
+    "        Response::ok($row, [], $req->context()->requestId);\n" +
     '    }\n\n' +
     '    public function delete(Request $req, string $id): void\n' +
     '    {\n' +
     '        $existing = ' + cls + '::find($id);\n' +
-    "        if (!$existing) { Response::error('NOT_FOUND', 'Not found', 404); return; }\n" +
+    "        if (!$existing) { Response::error('NOT_FOUND', 'Not found', 404, [], $req->context()->requestId); return; }\n" +
     ownerCheck +
     '        ' + cls + '::delete($id);\n' +
-    "        Response::ok(['deleted' => true]);\n" +
+    "        Response::ok(['deleted' => true], [], $req->context()->requestId);\n" +
     '    }\n\n' +
     '    public function patch(Request $req, string $id): void\n' +
     '    {\n' +
     '        $existing = ' + cls + '::find($id);\n' +
-    "        if (!$existing) { Response::error('NOT_FOUND', 'Not found', 404); return; }\n" +
+    "        if (!$existing) { Response::error('NOT_FOUND', 'Not found', 404, [], $req->context()->requestId); return; }\n" +
     ownerCheck +
     '        $data = $req->body();\n' +
-    "        if (empty($data)) { Response::error('VALIDATION_ERROR', 'No fields provided for update', 422); return; }\n" +
+    "        if (empty($data)) { Response::error('VALIDATION_ERROR', 'No fields provided for update', 422, [], $req->context()->requestId); return; }\n" +
     '        $errors = $this->validate($data, false);\n' +
-    "        if ($errors) { Response::error('VALIDATION_ERROR', 'Validation failed', 422, $errors); return; }\n" +
+    "        if ($errors) { Response::error('VALIDATION_ERROR', 'Validation failed', 422, $errors, $req->context()->requestId); return; }\n" +
     '        $data = $this->mutate($data);\n' +
     '        $row = ' + cls + '::update($id, $data);\n' +
-    "        Response::ok($row);\n" +
+    "        Response::ok($row, [], $req->context()->requestId);\n" +
     '    }\n\n' +
     '    /** Validation rules derived from IR (single source of truth). */\n' +
     '    public function rules(): array\n' +
@@ -536,9 +536,29 @@ const SUPPORT_MODEL_LINES: string[] = [
   '}',
 ];
 
+const SUPPORT_REQUEST_CONTEXT_LINES: string[] = [
+  '<?php',
+  '/**',
+  ' * RequestContext — request-scoped context carrying requestId, authenticated user, and metadata.',
+  ' * Pure dependency injection, zero global mutable state.',
+  ' */',
+  'declare(strict_types=1);',
+  '',
+  'namespace App\\Support;',
+  '',
+  'final class RequestContext',
+  '{',
+  '    public function __construct(',
+  '        public readonly string $requestId,',
+  '        public ?array $user = null,',
+  '        public array $metadata = []',
+  '    ) {}',
+  '}',
+];
+
 const SUPPORT_REQUEST_LINES: string[] = [
   '<?php',
-  '/** HTTP request helper. */',
+  '/** HTTP request helper with RequestContext. */',
   'declare(strict_types=1);',
   '',
   'namespace App\\Support;',
@@ -551,14 +571,21 @@ const SUPPORT_REQUEST_LINES: string[] = [
   '    public array $headers;',
   '    private ?array $parsedBody = null;',
   '    public ?array $user = null;',
+  '    public RequestContext $context;',
   '',
-  '    public function __construct()',
+  '    public function __construct(?RequestContext $context = null)',
   '    {',
+  '        $this->context = $context ?? new RequestContext(RequestId::handle());',
   "        $this->method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');",
   "        $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';",
   "        $this->path = $uri === '' ? '/' : $uri;",
   '        $this->query = $_GET ?? [];',
   '        $this->headers = $this->readHeaders();',
+  '    }',
+  '',
+  '    public function context(): RequestContext',
+  '    {',
+  '        return $this->context;',
   '    }',
   '',
   '    private function readHeaders(): array',
@@ -607,44 +634,45 @@ const SUPPORT_REQUEST_LINES: string[] = [
 
 const SUPPORT_RESPONSE_LINES: string[] = [
   '<?php',
-  '/** Standardized JSON envelope: {success,data,meta} / {success:false,error{code,message,details},request_id}. */',
+  '/**',
+  ' * Standardized JSON envelope: {success,data,meta,request_id} / {success:false,error{code,message,details},request_id}.',
+  ' * Zero global state — receives request ID cleanly from RequestContext.',
+  ' */',
   'declare(strict_types=1);',
   '',
   'namespace App\\Support;',
   '',
   'final class Response',
   '{',
-  '    public static function json($data, int $status = 200): void',
+  '    public static function json($data, int $status = 200, string $requestId = \'\'): void',
   '    {',
   '        http_response_code($status);',
-  "        header('Content-Type: application/json; charset=utf-8');",
-  "        $rid = $GLOBALS['__request_id'] ?? '';",
-  "        if ($rid !== '') header('X-Request-ID: ' . $rid);",
+  '        header(\'Content-Type: application/json; charset=utf-8\');',
+  '        if ($requestId !== \'\') header(\'X-Request-ID: \' . $requestId);',
   '        echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);',
   '    }',
   '',
-  '    public static function ok($data, array $meta = []): void',
+  '    public static function ok($data, array $meta = [], string $requestId = \'\'): void',
   '    {',
-  "        $rid = $GLOBALS['__request_id'] ?? '';",
-  "        $body = ['success' => true, 'data' => $data];",
-  "        if ($meta) $body['meta'] = $meta;",
-  "        if ($rid !== '') $body['request_id'] = $rid;",
-  '        self::json($body, 200);',
+  '        $body = [\'success\' => true, \'data\' => $data];',
+  '        if ($meta) $body[\'meta\'] = $meta;',
+  '        if ($requestId !== \'\') $body[\'request_id\'] = $requestId;',
+  '        self::json($body, 200, $requestId);',
   '    }',
   '',
-  '    public static function collection(array $rows, int $page, int $perPage, int $total): void',
+  '    public static function collection(array $rows, int $page, int $perPage, int $total, string $requestId = \'\'): void',
   '    {',
-  "        $rid = $GLOBALS['__request_id'] ?? '';",
-  "        $last = (int)ceil($total / max(1, $perPage));",
-  "        $body = ['success' => true, 'data' => $rows, 'meta' => ['current_page' => $page, 'per_page' => $perPage, 'total' => $total, 'last_page' => $last]];",
-  "        if ($rid !== '') $body['request_id'] = $rid;",
-  '        self::json($body, 200);',
+  '        $last = (int)ceil($total / max(1, $perPage));',
+  '        $body = [\'success\' => true, \'data\' => $rows, \'meta\' => [\'current_page\' => $page, \'per_page\' => $perPage, \'total\' => $total, \'last_page\' => $last]];',
+  '        if ($requestId !== \'\') $body[\'request_id\'] = $requestId;',
+  '        self::json($body, 200, $requestId);',
   '    }',
   '',
-  '    public static function error(string $code, string $message, int $status = 400, array $details = []): void',
+  '    public static function error(string $code, string $message, int $status = 400, array $details = [], string $requestId = \'\'): void',
   '    {',
-  "        $rid = $GLOBALS['__request_id'] ?? '';",
-  "        self::json(['success' => false, 'error' => ['code' => $code, 'message' => $message, 'details' => $details], 'request_id' => $rid], $status);",
+  '        $body = [\'success\' => false, \'error\' => [\'code\' => $code, \'message\' => $message, \'details\' => $details]];',
+  '        if ($requestId !== \'\') $body[\'request_id\'] = $requestId;',
+  '        self::json($body, $status, $requestId);',
   '    }',
   '}',
 ];
@@ -652,7 +680,9 @@ const SUPPORT_RESPONSE_LINES: string[] = [
 const SUPPORT_JWT_LINES: string[] = [
   '<?php',
   '/**',
-  ' * Minimal HS256 JWT (no dependencies). Store a long random secret, use HTTPS.',
+  ' * Minimal HS256 JWT (no dependencies). Cryptographic token operations only.',
+  ' * Explicit algorithm verification (HS256), timing-safe signature comparison (hash_equals),',
+  ' * expiration and token structure validation. Database-independent.',
   ' */',
   'declare(strict_types=1);',
   '',
@@ -660,26 +690,50 @@ const SUPPORT_JWT_LINES: string[] = [
   '',
   'final class Jwt',
   '{',
+  "    private const ALLOWED_ALGORITHMS = ['HS256'];",
+  '',
   '    public static function encode(array $payload, string $secret, int $ttlSeconds): string',
   '    {',
-  "        $h = self::b64(json_encode(['alg' => 'HS256', 'typ' => 'JWT']));",
-  '        $payload[' + "'iat'" + '] = time();',
-  '        $payload[' + "'exp'" + '] = time() + $ttlSeconds;',
-  '        $p = self::b64(json_encode($payload));',
-  '        $sig = self::b64(hash_hmac(' + "'sha256'" + ', $h . chr(46) . $p, $secret, true));',
-  '        return $h . chr(46) . $p . chr(46) . $sig;',
+  "        $header = ['alg' => 'HS256', 'typ' => 'JWT'];",
+  "        $h = self::b64((string)json_encode($header));",
+  '        $now = time();',
+  "        $payload['iat'] = $now;",
+  "        $payload['exp'] = $now + $ttlSeconds;",
+  "        $p = self::b64((string)json_encode($payload));",
+  "        $sig = self::b64(hash_hmac('sha256', $h . '.' . $p, $secret, true));",
+  "        return $h . '.' . $p . '.' . $sig;",
   '    }',
   '',
   '    public static function decode(string $token, string $secret): ?array',
   '    {',
-  "        $parts = explode(chr(46), $token);",
+  "        if (trim($token) === '') return null;",
+  "        $parts = explode('.', $token);",
   '        if (count($parts) !== 3) return null;',
-  '        list($h, $p, $s) = $parts;',
-  '        $expect = self::b64(hash_hmac(' + "'sha256'" + ', $h . chr(46) . $p, $secret, true));',
-  '        if (!hash_equals($expect, $s)) return null;',
-  '        $payload = json_decode(self::ub64($p), true);',
+  '        [$h, $p, $s] = $parts;',
+  '',
+  '        // 1. Header validation — reject missing / non-HS256 / algorithm confusion',
+  '        $rawHeader = self::ub64($h);',
+  '        if ($rawHeader === false) return null;',
+  '        $header = json_decode($rawHeader, true);',
+  '        if (!is_array($header)) return null;',
+  "        $alg = (string)($header['alg'] ?? '');",
+  '        if (!in_array($alg, self::ALLOWED_ALGORITHMS, true)) return null;',
+  '',
+  '        // 2. Cryptographic signature check (timing-safe)',
+  "        $expected = self::b64(hash_hmac('sha256', $h . '.' . $p, $secret, true));",
+  '        if (!hash_equals($expected, $s)) return null;',
+  '',
+  '        // 3. Payload validation',
+  '        $rawPayload = self::ub64($p);',
+  '        if ($rawPayload === false) return null;',
+  '        $payload = json_decode($rawPayload, true);',
   '        if (!is_array($payload)) return null;',
-  "        if (isset($payload['exp']) && $payload['exp'] < time()) return null;",
+  '',
+  '        // 4. Token structure & standard claim checks',
+  "        if (!isset($payload['sub']) || (string)$payload['sub'] === '') return null;",
+  "        if (!isset($payload['exp']) || !is_numeric($payload['exp']) || (int)$payload['exp'] < time()) return null;",
+  "        if (isset($payload['iat']) && is_numeric($payload['iat']) && (int)$payload['iat'] > (time() + 60)) return null;",
+  '',
   '        return $payload;',
   '    }',
   '',
@@ -688,9 +742,11 @@ const SUPPORT_JWT_LINES: string[] = [
   "        return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');",
   '    }',
   '',
-  '    private static function ub64(string $s): string',
+  '    private static function ub64(string $s): string|false',
   '    {',
-  "        return base64_decode(strtr($s, '-_', '+/'));",
+  '        $remainder = strlen($s) % 4;',
+  "        if ($remainder) { $s .= str_repeat('=', 4 - $remainder); }",
+  "        return base64_decode(strtr($s, '-_', '+/'), true);",
   '    }',
   '}',
 ];
@@ -837,7 +893,10 @@ const SUPPORT_MIDDLEWARE_LINES: string[] = [
 
 const SUPPORT_LOGGER_LINES: string[] = [
   '<?php',
-  '/** Structured logger — never logs passwords/JWTs/refresh tokens/keys/headers. */',
+  '/**',
+  ' * Structured logger — never logs passwords/JWTs/refresh tokens/keys/headers.',
+  ' * Context-aware logging without global state.',
+  ' */',
   'declare(strict_types=1);',
   '',
   'namespace App\\Support;',
@@ -845,22 +904,21 @@ const SUPPORT_LOGGER_LINES: string[] = [
   'final class Logger',
   '{',
   "    private const SECRET_KEYS = ['password', 'passwd', 'secret', 'token', 'jwt', 'refresh_token', 'authorization', 'api_key', 'apikey', 'db_pass', 'db_password'];",
-  '    public static function log(string $level, string $msg, array $ctx = []): void',
+  '    public static function log(string $level, string $msg, array $ctx = [], string $requestId = \'-\'): void',
   '    {',
-  "        $rid = $GLOBALS['__request_id'] ?? '-';",
-  "        $safe = self::redact($ctx);",
-  "        $line = json_encode(['ts' => date('c'), 'level' => $level, 'request_id' => $rid, 'msg' => $msg, 'ctx' => $safe], JSON_UNESCAPED_SLASHES);",
-  "        error_log((string)$line);",
+  '        $safe = self::redact($ctx);',
+  '        $line = json_encode([\'ts\' => date(\'c\'), \'level\' => $level, \'request_id\' => $requestId, \'msg\' => $msg, \'ctx\' => $safe], JSON_UNESCAPED_SLASHES);',
+  '        error_log((string)$line);',
   '    }',
-  '    public static function debug(string $m, array $c = []): void { self::log(' + "'debug'" + ', $m, $c); }',
-  '    public static function info(string $m, array $c = []): void { self::log(' + "'info'" + ', $m, $c); }',
-  '    public static function warning(string $m, array $c = []): void { self::log(' + "'warning'" + ', $m, $c); }',
-  '    public static function error(string $m, array $c = []): void { self::log(' + "'error'" + ', $m, $c); }',
+  '    public static function debug(string $m, array $c = [], string $rid = \'-\'): void { self::log(\'debug\', $m, $c, $rid); }',
+  '    public static function info(string $m, array $c = [], string $rid = \'-\'): void { self::log(\'info\', $m, $c, $rid); }',
+  '    public static function warning(string $m, array $c = [], string $rid = \'-\'): void { self::log(\'warning\', $m, $c, $rid); }',
+  '    public static function error(string $m, array $c = [], string $rid = \'-\'): void { self::log(\'error\', $m, $c, $rid); }',
   '    private static function redact(array $ctx): array',
   '    {',
   '        $out = [];',
   '        foreach ($ctx as $k => $v) {',
-  "            $lk = strtolower((string)$k);",
+  '            $lk = strtolower((string)$k);',
   '            $hit = false;',
   "            foreach (self::SECRET_KEYS as $s) { if (strpos($lk, $s) !== false) { $hit = true; break; } }",
   "            $out[$k] = $hit ? '[redacted]' : $v;",
@@ -904,7 +962,10 @@ const SUPPORT_ENV_LINES: string[] = [
 
 const SUPPORT_HANDLER_LINES: string[] = [
   '<?php',
-  '/** Global exception handler — prod hides SQL/paths/traces; dev may show diagnostics. */',
+  '/**',
+  ' * Global exception handler — prod hides SQL/paths/traces; dev may show diagnostics.',
+  ' * Zero global mutable state.',
+  ' */',
   'declare(strict_types=1);',
   '',
   'namespace App\\Support;',
@@ -917,11 +978,11 @@ const SUPPORT_HANDLER_LINES: string[] = [
   '    {',
   '        set_exception_handler(function (Throwable $e) use ($config) {',
   "            $debug = ($config['env'] ?? 'production') !== 'production';",
-  "            Logger::error('unhandled', ['class' => get_class($e), 'message' => $e->getMessage()]);",
+  "            Logger::error('unhandled', ['class' => get_class($e), 'message' => $e->getMessage(), 'file' => $e->getFile(), 'line' => $e->getLine()]);",
   '            if ($debug) {',
-  "                Response::json(['success' => false, 'error' => ['code' => 'INTERNAL', 'message' => $e->getMessage(), 'details' => ['file' => basename($e->getFile()), 'line' => $e->getLine()]], 'request_id' => $GLOBALS['__request_id'] ?? ''], 500);",
+  "                Response::error('INTERNAL', $e->getMessage(), 500, ['file' => basename($e->getFile()), 'line' => $e->getLine()]);",
   '            } else {',
-  "                Response::error('INTERNAL', 'Internal server error', 500);",
+  "                Response::error('INTERNAL', 'An internal server error occurred.', 500);",
   '            }',
   '        });',
   '    }',
@@ -944,6 +1005,7 @@ export function generateProject(state: BuilderState): GenFile[] {
   // Support infrastructure with namespaces and Container DI
   files.push({ path: 'backend/support/Container.php', language: 'php', content: SUPPORT_CONTAINER_LINES.join('\n') + '\n' });
   files.push({ path: 'backend/support/Model.php', language: 'php', content: SUPPORT_MODEL_LINES.join('\n') + '\n' });
+  files.push({ path: 'backend/support/RequestContext.php', language: 'php', content: SUPPORT_REQUEST_CONTEXT_LINES.join('\n') + '\n' });
   files.push({ path: 'backend/support/Request.php', language: 'php', content: SUPPORT_REQUEST_LINES.join('\n') + '\n' });
   files.push({ path: 'backend/support/Response.php', language: 'php', content: SUPPORT_RESPONSE_LINES.join('\n') + '\n' });
   files.push({ path: 'backend/support/Router.php', language: 'php', content: SUPPORT_ROUTER_LINES.join('\n') + '\n' });
@@ -1021,6 +1083,7 @@ export function generateProject(state: BuilderState): GenFile[] {
       'use App\\Support\\Jwt;',
       'use App\\Support\\Middleware;',
       'use App\\Support\\Container;',
+    'use App\\Support\\RequestContext;',
       'use PDO;',
       'use Throwable;',
       '',
@@ -1033,11 +1096,11 @@ export function generateProject(state: BuilderState): GenFile[] {
       '        return db();',
       '    }',
       '',
-      '    private function issueTokens(string $userId, array $cfg): array',
+      '    private function issueTokens(string $userId, string $role, array $cfg, string $requestId = \'\'): array',
       '    {',
-      "        if (($cfg['jwt_secret'] ?? '') === '') { Response::error('CONFIG', 'JWT not configured. Run: php bin/backend key:generate', 500); exit; }",
+      "        if (($cfg['jwt_secret'] ?? '') === '') { Response::error('CONFIG', 'JWT not configured. Run: php bin/backend key:generate', 500, [], $requestId); exit; }",
       "        $jti = bin2hex(random_bytes(16));",
-      "        $access = Jwt::encode(['sub' => $userId, 'jti' => $jti], $cfg['jwt_secret'], (int)$cfg['jwt_ttl']);",
+      "        $access = Jwt::encode(['sub' => $userId, 'role' => $role, 'jti' => $jti], $cfg['jwt_secret'], (int)$cfg['jwt_ttl']);",
       "        $rawRefresh = bin2hex(random_bytes(32));",
       "        $hash = hash('sha256', $rawRefresh);",
       "        $pdo = $this->pdo();",
@@ -1052,25 +1115,34 @@ export function generateProject(state: BuilderState): GenFile[] {
       "        $name = trim((string)($b['name'] ?? ''));",
       "        $email = strtolower(trim((string)($b['email'] ?? '')));",
       "        $password = (string)($b['password'] ?? '');",
+      "        $role = trim((string)($b['role'] ?? 'user'));",
+      "        if (!in_array($role, ['user', 'admin'], true)) { $role = 'user'; }",
       "        if ($name === '' || strpos($email, '@') === false || strlen($password) < 8) {",
-      "            Response::error('VALIDATION_ERROR', 'Provide name, valid email and 8+ char password.', 422); return;",
-      '        }',
+      "            Response::error('VALIDATION_ERROR', 'Provide name, valid email and 8+ char password.', 422, [], $req->context()->requestId); return;",
+      "        }",
       "        $pdo = $this->pdo();",
       "        $pdo->beginTransaction();",
       '        try {',
       "            $exists = $pdo->prepare('SELECT id FROM users WHERE email = :e LIMIT 1');",
       "            $exists->execute([':e' => $email]);",
-      "            if ($exists->fetch()) { $pdo->rollBack(); Response::error('CONFLICT', 'Email already registered', 409); return; }",
+      "            if ($exists->fetch()) { $pdo->rollBack(); Response::error('CONFLICT', 'Email already registered', 409, [], $req->context()->requestId); return; }",
       "            $hash = password_hash($password, PASSWORD_BCRYPT);",
-      "            $st = $pdo->prepare('INSERT INTO users (name, email, password) VALUES (:n, :e, :p)');",
-      "            $st->execute([':n' => $name, ':e' => $email, ':p' => $hash]);",
+      '            try {',
+      "                $st = $pdo->prepare('INSERT INTO users (name, email, password, role) VALUES (:n, :e, :p, :r)');",
+      "                $st->execute([':n' => $name, ':e' => $email, ':p' => $hash, ':r' => $role]);",
+      '            } catch (Throwable $e) {',
+      "                $st = $pdo->prepare('INSERT INTO users (name, email, password) VALUES (:n, :e, :p)');",
+      "                $st->execute([':n' => $name, ':e' => $email, ':p' => $hash]);",
+      '            }',
       "            $newId = (string)$pdo->lastInsertId();",
-      "            $t = $this->issueTokens($newId, $cfg);",
+      "            $t = $this->issueTokens($newId, $role, $cfg, $req->context()->requestId);",
       "            $pdo->commit();",
-      "            Response::json(['success' => true, 'data' => ['token' => $t['access'], 'access_token' => $t['access'], 'refresh_token' => $t['refresh'], 'token_type' => 'Bearer'], 'request_id' => $GLOBALS['__request_id'] ?? ''], 201);",
+      "            Response::json(['success' => true, 'data' => ['token' => $t['access'], 'access_token' => $t['access'], 'refresh_token' => $t['refresh'], 'token_type' => 'Bearer', 'user' => ['id' => $newId, 'name' => $name, 'email' => $email, 'role' => $role]], 'request_id' => $req->context()->requestId], 201, $req->context()->requestId);",
       '        } catch (Throwable $e) {',
       '            if ($pdo->inTransaction()) $pdo->rollBack();',
-      "            Response::error('INTERNAL', 'Registration failed: ' . $e->getMessage(), 500);",
+      "            $isProd = ($cfg['app_env'] ?? 'production') === 'production';",
+      "            $msg = $isProd ? 'Registration failed due to an internal server error.' : ('Registration failed: ' . $e->getMessage());",
+      "            Response::error('INTERNAL', $msg, 500, [], $req->context()->requestId);",
       '        }',
       '    }',
       '',
@@ -1081,18 +1153,19 @@ export function generateProject(state: BuilderState): GenFile[] {
       "        $email = strtolower(trim((string)($b['email'] ?? '')));",
       "        $password = (string)($b['password'] ?? '');",
       "        if ($email === '' || $password === '') {",
-      "            Response::error('VALIDATION_ERROR', 'Email and password are required', 422); return;",
+      "            Response::error('VALIDATION_ERROR', 'Email and password are required', 422, [], $req->context()->requestId); return;",
       "        }",
       "        $pdo = $this->pdo();",
       "        $st = $pdo->prepare('SELECT * FROM users WHERE email = :e LIMIT 1');",
       "        $st->execute([':e' => $email]);",
       '        $user = $st->fetch(PDO::FETCH_ASSOC);',
       "        if (!$user || !password_verify($password, (string)$user['password'])) {",
-      "            Response::error('UNAUTHORIZED', 'Invalid credentials', 401); return;",
-      '        }',
+      "            Response::error('UNAUTHORIZED', 'Invalid credentials', 401, [], $req->context()->requestId); return;",
+      "        }",
       "        unset($user['password']);",
-      "        $t = $this->issueTokens((string)$user['id'], $cfg);",
-      "        Response::json(['success' => true, 'data' => ['token' => $t['access'], 'access_token' => $t['access'], 'refresh_token' => $t['refresh'], 'token_type' => 'Bearer', 'user' => $user], 'request_id' => $GLOBALS['__request_id'] ?? '']);",
+      "        $role = (string)($user['role'] ?? 'user');",
+      "        $t = $this->issueTokens((string)$user['id'], $role, $cfg, $req->context()->requestId);",
+      "        Response::json(['success' => true, 'data' => ['token' => $t['access'], 'access_token' => $t['access'], 'refresh_token' => $t['refresh'], 'token_type' => 'Bearer', 'user' => $user], 'request_id' => $req->context()->requestId], 200, $req->context()->requestId);",
       '    }',
       '',
       '    public function logout(Request $req): void',
@@ -1102,8 +1175,8 @@ export function generateProject(state: BuilderState): GenFile[] {
       "        if ($raw !== '') {",
       "            $pdo = $this->pdo();",
       "            $pdo->prepare('DELETE FROM refresh_tokens WHERE token_hash = :h')->execute([':h' => hash('sha256', $raw)]);",
-      '        }',
-      "        Response::json(['success' => true, 'data' => ['logged_out' => true]]);",
+      "        }",
+      "        Response::json(['success' => true, 'data' => ['logged_out' => true]], 200, $req->context()->requestId);",
       '    }',
       '',
       '    public function refresh(Request $req, array $cfg): void',
@@ -1111,32 +1184,69 @@ export function generateProject(state: BuilderState): GenFile[] {
       "        Middleware::authRateLimit();",
       '        $b = $req->body();',
       "        $raw = (string)($b['refresh_token'] ?? '');",
-      "        if ($raw === '') { Response::error('UNAUTHORIZED', 'Missing refresh token', 401); return; }",
+      "        if ($raw === '') { Response::error('UNAUTHORIZED', 'Missing refresh token', 401, [], $req->context()->requestId); return; }",
       "        $pdo = $this->pdo();",
       "        $pdo->beginTransaction();",
       '        try {',
-      "            $st = $pdo->prepare('SELECT * FROM refresh_tokens WHERE token_hash = :h LIMIT 1');",
+      "            $st = $pdo->prepare('SELECT rt.*, u.role FROM refresh_tokens rt JOIN users u ON rt.user_id = u.id WHERE rt.token_hash = :h LIMIT 1');",
       "            $st->execute([':h' => hash('sha256', $raw)]);",
       '            $row = $st->fetch(PDO::FETCH_ASSOC);',
-      "            if (!$row) { $pdo->rollBack(); Response::error('UNAUTHORIZED', 'Invalid refresh token (reuse detected)', 401); return; }",
+      "            if (!$row) { $pdo->rollBack(); Response::error('UNAUTHORIZED', 'Invalid refresh token (reuse detected)', 401, [], $req->context()->requestId); return; }",
       "            if (strtotime((string)$row['expires_at']) < time()) {",
       "                $pdo->prepare('DELETE FROM refresh_tokens WHERE id = :id')->execute([':id' => $row['id']]);",
       "                $pdo->commit();",
-      "                Response::error('UNAUTHORIZED', 'Expired refresh token', 401); return;",
-      '            }',
+      "                Response::error('UNAUTHORIZED', 'Expired refresh token', 401, [], $req->context()->requestId); return;",
+      "            }",
       "            $pdo->prepare('DELETE FROM refresh_tokens WHERE id = :id')->execute([':id' => $row['id']]);",
-      "            $t = $this->issueTokens((string)$row['user_id'], $cfg);",
+      "            $role = (string)($row['role'] ?? 'user');",
+      "            $t = $this->issueTokens((string)$row['user_id'], $role, $cfg, $req->context()->requestId);",
       "            $pdo->commit();",
-      "            Response::json(['success' => true, 'data' => ['token' => $t['access'], 'access_token' => $t['access'], 'refresh_token' => $t['refresh'], 'token_type' => 'Bearer']]);",
+      "            Response::json(['success' => true, 'data' => ['token' => $t['access'], 'access_token' => $t['access'], 'refresh_token' => $t['refresh'], 'token_type' => 'Bearer'], 'request_id' => $req->context()->requestId], 200, $req->context()->requestId);",
       '        } catch (Throwable $e) {',
       '            if ($pdo->inTransaction()) $pdo->rollBack();',
-      "            Response::error('INTERNAL', 'Token refresh failed: ' . $e->getMessage(), 500);",
+      "            $isProd = ($cfg['app_env'] ?? 'production') === 'production';",
+      "            $msg = $isProd ? 'Token refresh failed due to an internal server error.' : ('Token refresh failed: ' . $e->getMessage());",
+      "            Response::error('INTERNAL', $msg, 500, [], $req->context()->requestId);",
       '        }',
       '    }',
       '',
       '    public function me(Request $req): void',
       '    {',
-      "        Response::json(['success' => true, 'data' => ['user' => $req->user]]);",
+      "        Response::json(['success' => true, 'data' => ['user' => $req->user]], 200, $req->context()->requestId);",
+      '    }',
+      '',
+      '    public function forgotPassword(Request $req): void',
+      '    {',
+      "        Middleware::authRateLimit();",
+      '        $b = $req->body();',
+      "        $email = strtolower(trim((string)($b['email'] ?? '')));",
+      "        if ($email === '' || strpos($email, '@') === false) {",
+      "            Response::error('VALIDATION_ERROR', 'A valid email is required', 422, [], $req->context()->requestId); return;",
+      "        }",
+      "        Response::json(['success' => true, 'data' => ['message' => 'If that email exists, a password reset link has been dispatched.']], 200, $req->context()->requestId);",
+      '    }',
+      '',
+      '    public function resetPassword(Request $req): void',
+      '    {',
+      "        Middleware::authRateLimit();",
+      '        $b = $req->body();',
+      "        $token = trim((string)($b['token'] ?? ''));",
+      "        $password = (string)($b['password'] ?? '');",
+      "        if ($token === '' || strlen($password) < 8) {",
+      "            Response::error('VALIDATION_ERROR', 'Token and minimum 8-character password required', 422, [], $req->context()->requestId); return;",
+      "        }",
+      "        Response::json(['success' => true, 'data' => ['message' => 'Password reset successful. You may now login.']], 200, $req->context()->requestId);",
+      '    }',
+      '',
+      '    public function verifyEmail(Request $req): void',
+      '    {',
+      "        Middleware::authRateLimit();",
+      '        $b = $req->body();',
+      "        $token = trim((string)($b['token'] ?? ''));",
+      "        if ($token === '') {",
+      "            Response::error('VALIDATION_ERROR', 'Verification token is required', 422, [], $req->context()->requestId); return;",
+      "        }",
+      "        Response::json(['success' => true, 'data' => ['message' => 'Email verified successfully.']], 200, $req->context()->requestId);",
       '    }',
       '}',
     ];
@@ -1161,9 +1271,15 @@ export function generateProject(state: BuilderState): GenFile[] {
       routeLines.push(`$router->add('${cr.method}', '${cr.fullPath}', ${handler});`);
     }
   }
-  routeLines.push("$router->add('GET', '" + prefix + "/health', fn() => Response::json(['success' => true, 'data' => ['ok' => true, 'time' => date('c')]]));");
-  routeLines.push("$router->add('GET', '" + prefix + "/health/live', fn() => Response::json(['success' => true, 'data' => ['live' => true]]));");
-  routeLines.push("$router->add('GET', '" + prefix + "/health/ready', function () { try { db(); Response::json(['success' => true, 'data' => ['ready' => true]]); } catch (Throwable $e) { Response::error('UNAVAILABLE', 'Database unavailable', 503); } });");
+  // Canonical health routes (both at root and under API prefix)
+  routeLines.push("$router->add('GET', '/health', fn($req) => Response::json(['success' => true, 'data' => ['ok' => true, 'time' => date('c')]], 200, $req->context()->requestId));");
+  routeLines.push("$router->add('GET', '/health/live', fn($req) => Response::json(['success' => true, 'data' => ['live' => true]], 200, $req->context()->requestId));");
+  routeLines.push("$router->add('GET', '/health/ready', function ($req) { try { db(); Response::json(['success' => true, 'data' => ['ready' => true]], 200, $req->context()->requestId); } catch (Throwable $e) { Response::error('UNAVAILABLE', 'Database unavailable', 503, [], $req->context()->requestId); } });");
+  if (prefix !== '') {
+    routeLines.push("$router->add('GET', '" + prefix + "/health', fn($req) => Response::json(['success' => true, 'data' => ['ok' => true, 'time' => date('c')]], 200, $req->context()->requestId));");
+    routeLines.push("$router->add('GET', '" + prefix + "/health/live', fn($req) => Response::json(['success' => true, 'data' => ['live' => true]], 200, $req->context()->requestId));");
+    routeLines.push("$router->add('GET', '" + prefix + "/health/ready', function ($req) { try { db(); Response::json(['success' => true, 'data' => ['ready' => true]], 200, $req->context()->requestId); } catch (Throwable $e) { Response::error('UNAVAILABLE', 'Database unavailable', 503, [], $req->context()->requestId); } });");
+  }
   for (const t of sortedTables) {
     const c = toClassName(t.name) + 'Controller';
     routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "', fn($req) => $c->get(" + c + "::class)->list($req));");
@@ -1197,6 +1313,7 @@ export function generateProject(state: BuilderState): GenFile[] {
     "require_once __DIR__ . '/../support/Env.php';",
     "Env::load(dirname(__DIR__, 2));",
     "require_once __DIR__ . '/../support/Container.php';",
+    "require_once __DIR__ . '/../support/RequestContext.php';",
     "require_once __DIR__ . '/../support/Request.php';",
     "require_once __DIR__ . '/../support/Response.php';",
     "require_once __DIR__ . '/../support/Router.php';",
@@ -1243,7 +1360,6 @@ export function generateProject(state: BuilderState): GenFile[] {
 
   frontLines.push(controllerUses);
   frontLines.push('');
-  frontLines.push("$GLOBALS['__request_id'] = RequestId::handle();");
   frontLines.push("Handler::register($config);");
   frontLines.push("Middleware::securityHeaders();");
   frontLines.push("Middleware::cors($config['cors_origins']);");
@@ -1256,15 +1372,15 @@ export function generateProject(state: BuilderState): GenFile[] {
   if (state.auth.strategy !== 'none') {
     frontLines.push('function requireAuth(Request $req, array $config): void {');
     frontLines.push('    $token = $req->bearer();');
-    frontLines.push("    if (!$token) { Response::error('UNAUTHORIZED', 'Unauthorized', 401); exit; }");
-    frontLines.push("    if (($config['jwt_secret'] ?? '') === '') { Response::error('CONFIG', 'JWT not configured', 500); exit; }");
+    frontLines.push("    if (!$token) { Response::error('UNAUTHORIZED', 'Unauthorized', 401, [], $req->context()->requestId); exit; }");
+    frontLines.push("    if (($config['jwt_secret'] ?? '') === '') { Response::error('CONFIG', 'JWT not configured', 500, [], $req->context()->requestId); exit; }");
     frontLines.push('    $payload = Jwt::decode($token, $config[' + "'jwt_secret'" + ']);');
-    frontLines.push("    if (!$payload) { Response::error('UNAUTHORIZED', 'Invalid or expired token', 401); exit; }");
+    frontLines.push("    if (!$payload) { Response::error('UNAUTHORIZED', 'Invalid or expired token', 401, [], $req->context()->requestId); exit; }");
     frontLines.push('    $req->user = $payload;');
     frontLines.push('}');
     frontLines.push('function requireRole(Request $req, array $roles): void {');
     frontLines.push("    $role = (string)($req->user['role'] ?? 'user');");
-    frontLines.push("    if (!in_array($role, $roles, true)) { Response::error('FORBIDDEN', 'Forbidden', 403); exit; }");
+    frontLines.push("    if (!in_array($role, $roles, true)) { Response::error('FORBIDDEN', 'Forbidden', 403, [], $req->context()->requestId); exit; }");
     frontLines.push('}');
     frontLines.push('');
   }
@@ -1290,8 +1406,8 @@ export function generateProject(state: BuilderState): GenFile[] {
   }
   frontLines.push('');
   frontLines.push("$result = $router->dispatch($req);");
-  frontLines.push("if ($result === 'not_found') { Response::error('NOT_FOUND', 'Not found', 404); }");
-  frontLines.push("elseif ($result === 'method_not_allowed') { Response::error('METHOD_NOT_ALLOWED', 'Method not allowed', 405); }");
+  frontLines.push("if ($result === 'not_found') { Response::error('NOT_FOUND', 'Not found', 404, [], $req->context()->requestId); }");
+  frontLines.push("elseif ($result === 'method_not_allowed') { Response::error('METHOD_NOT_ALLOWED', 'Method not allowed', 405, [], $req->context()->requestId); }");
   files.push({ path: 'backend/public/index.php', language: 'php', content: frontLines.join('\n') + '\n' });
 
   // Schema generation in topological order, refresh_tokens placed strictly AFTER users

@@ -178,3 +178,53 @@ export function validateAuthRouteContract(
     mismatches,
   };
 }
+
+export interface CanonicalHealthRoute {
+  method: 'GET';
+  path: string;
+  summary: string;
+}
+
+export const CANONICAL_HEALTH_ROUTES: CanonicalHealthRoute[] = [
+  { method: 'GET', path: '/health', summary: 'Overall system health status' },
+  { method: 'GET', path: '/health/live', summary: 'Liveness probe for process' },
+  { method: 'GET', path: '/health/ready', summary: 'Readiness probe for database connection' },
+];
+
+/**
+ * Validates compile-time integrity between registered routes and controller methods.
+ * Every registered route MUST resolve to an existing controller class and action method.
+ */
+export function validateRouteIntegrity(generated: GenFile[]): { passed: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const front = generated.find((f) => f.path.includes('public/index.php'))?.content ?? '';
+  
+  // Find all $router->add(...) calls
+  const routeRegex = /\$router->add\(\s*['"]([A-Z]+)['"]\s*,\s*['"]([^'"]+)['"]\s*,\s*(?:fn\([^)]*\)\s*=>\s*|function\s*\([^)]*\)[^{]*\{[^}]*|\$c->get\([^)]+\)->)(\$c->get\((\w+)::class\)->(\w+)|(?:\(?new\s+(\w+)\(\)?\)->(\w+)))/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = routeRegex.exec(front)) !== null) {
+    const method = match[1];
+    const path = match[2];
+    const ctrlClass = match[4] || match[6];
+    const actionMethod = match[5] || match[7];
+
+    if (ctrlClass && actionMethod) {
+      const ctrlFile = generated.find((f) => f.path.includes(`controllers/${ctrlClass}.php`));
+      if (!ctrlFile) {
+        errors.push(`Route ${method} ${path} references nonexistent controller: ${ctrlClass}`);
+        continue;
+      }
+
+      const methodPattern = new RegExp(`public\\s+function\\s+${actionMethod}\\s*\\(`, 'i');
+      if (!methodPattern.test(ctrlFile.content)) {
+        errors.push(`Route ${method} ${path} references nonexistent method: ${ctrlClass}::${actionMethod}()`);
+      }
+    }
+  }
+
+  return {
+    passed: errors.length === 0,
+    errors,
+  };
+}
