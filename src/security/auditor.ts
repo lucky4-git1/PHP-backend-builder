@@ -579,6 +579,53 @@ export function auditSecurity(input: AuditInput): SecurityFinding[] {
     }
   }
 
+  // 9. Public Registration Privilege Escalation Check
+  const authCtrl = findFile('backend/controllers/AuthController.php');
+  const authSvc = findFile('backend/services/AuthService.php');
+  if (authCtrl || authSvc) {
+    const ctrlSrc = authCtrl ? authCtrl.content : '';
+    const svcSrc = authSvc ? authSvc.content : '';
+    const readsRoleInCtrl = /\$b\s*\[\s*['"]role['"]\s*\]/i.test(ctrlSrc);
+    const acceptsRoleInSvc = /function\s+register\([^)]*\$role/i.test(svcSrc) || /\$role\s*=\s*\$b/i.test(svcSrc);
+    const allowsAdminEscalation = readsRoleInCtrl || acceptsRoleInSvc;
+
+    if (allowsAdminEscalation) {
+      const targetFile = authCtrl ? 'backend/controllers/AuthController.php' : 'backend/services/AuthService.php';
+      const loc = GeneratedArtifactLocationResolver.resolve(generated, targetFile, 'role', {
+        ruleId: 'SEC_PUBLIC_REGISTRATION_ROLE_ESCALATION',
+        generator: 'generator.ts',
+      });
+      out.push(
+        createFinding(
+          projectId,
+          'SEC_PUBLIC_REGISTRATION_ROLE_ESCALATION',
+          'authorization',
+          'critical',
+          'Privilege escalation via public registration role parameter',
+          'Public registration accepts a caller-supplied role and permits assignment of elevated privileges like admin.',
+          loc,
+          'Request body role parameter is trusted during public account creation.',
+          'Attackers can register arbitrary administrative accounts and bypass RBAC entirely.',
+          {
+            summary: 'Remove role from public registration schema and hardcode role = user',
+            steps: [
+              'Remove role from registration input validation and request body parsing',
+              'Unconditionally assign role = "user" in AuthService::register',
+              'Require administrative privileges for role assignment via separate protected route',
+            ],
+            codeExample: "$role = 'user'; // Hardcoded for public registration",
+            automated: true,
+          },
+          {
+            code: GeneratedArtifactLocationResolver.extractEvidence(generated, targetFile, loc.lineStart || 1, 2),
+            ruleEvidence: 'Caller-supplied role accepted during public registration',
+          },
+          { status: 'open' }
+        )
+      );
+    }
+  }
+
   return out;
 }
 

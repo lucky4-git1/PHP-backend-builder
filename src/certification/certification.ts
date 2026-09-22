@@ -224,6 +224,35 @@ export function generateCertificationReport(input: {
     hardFloorReasons.push('CRITICAL DEFECT: JWT provider directly connects to MySQL — JWT must remain database-independent');
   }
 
+  // Public registration privilege escalation hard floor
+  const authCtrlSrc = byPath('backend/controllers/AuthController.php');
+  const authSvcSrc = byPath('backend/services/AuthService.php');
+  if (authCtrlSrc.includes("$b['role']") || (authSvcSrc && !authSvcSrc.includes("$role = 'user';"))) {
+    hardFloorReasons.push('CRITICAL DEFECT: Public registration permits caller-supplied role (privilege escalation risk)');
+  }
+
+  // Constructor injection vs service-locator hard floor
+  const businessSources = [authCtrlSrc, authSvcSrc, byPath('backend/repositories/UserRepository.php'), byPath('backend/repositories/RefreshTokenRepository.php')].filter(Boolean);
+  if (businessSources.some((src) => src.includes('Container::getInstance()') || src.includes('db()'))) {
+    hardFloorReasons.push('ARCHITECTURAL DEFECT: Business classes invoke service locator Container::getInstance() or db() directly');
+  }
+
+  // Single canonical health routes hard floor
+  const frontSrc = byPath('backend/public/index.php');
+  if (builder.config.apiPrefix && frontSrc.includes(`'${builder.config.apiPrefix}/health'`)) {
+    hardFloorReasons.push('Health routes duplicated under API prefix — violates single canonical health contract');
+  }
+
+  // Genuine component generation hard floor
+  if (builder.auth.strategy === 'jwt') {
+    const hasUserRepo = generated.some((f) => f.path === 'backend/repositories/UserRepository.php');
+    const hasRefreshRepo = generated.some((f) => f.path === 'backend/repositories/RefreshTokenRepository.php');
+    const hasAuthSvc = generated.some((f) => f.path === 'backend/services/AuthService.php');
+    if (!hasUserRepo || !hasRefreshRepo || !hasAuthSvc) {
+      hardFloorReasons.push('ARCHITECTURAL DEFECT: Missing required authentication layers (UserRepository, RefreshTokenRepository, AuthService)');
+    }
+  }
+
   // Calculate raw weighted score
   const categories = {
     architecture: { weight: 10, score: archScore, weightedScore: (archScore * 10) / 100, details: archDetails },

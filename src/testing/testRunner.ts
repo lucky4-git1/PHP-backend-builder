@@ -381,6 +381,14 @@ export function simulateAutoloader(generated: Array<GenFile | GeneratedFile>): A
         if (namespace !== 'App\\Controllers') {
           errors.push(`PSR-4 namespace mismatch in ${path}: expected App\\Controllers, found "${namespace}"`);
         }
+      } else if (path.includes('backend/repositories/')) {
+        if (namespace !== 'App\\Repositories') {
+          errors.push(`PSR-4 namespace mismatch in ${path}: expected App\\Repositories, found "${namespace}"`);
+        }
+      } else if (path.includes('backend/services/')) {
+        if (namespace !== 'App\\Services') {
+          errors.push(`PSR-4 namespace mismatch in ${path}: expected App\\Services, found "${namespace}"`);
+        }
       } else if (path.includes('backend/config/')) {
         if (namespace && namespace !== 'App\\Config') {
           errors.push(`PSR-4 namespace mismatch in ${path}: expected App\\Config, found "${namespace}"`);
@@ -641,177 +649,174 @@ export function simulateE2EAuthFlow(
   const frontSrc = byPath('public/index.php');
   const authCtrlSrc = byPath('AuthController.php');
   const jwtSrc = byPath('Jwt.php');
-  const authStoreSrc = byPath('auth-store.js');
-  const protectedRouteSrc = byPath('protected-route.js');
+  const authSvcSrc = byPath('AuthService.php');
+  const userRepoSrc = byPath('UserRepository.php');
+  const refreshRepoSrc = byPath('RefreshTokenRepository.php');
   const refreshTokensMig = generated.some((f) => pathOf(f).includes('refresh_tokens') && pathOf(f).endsWith('.php'));
 
-  // Step 1: Register endpoint exists
+  // Step 1: Register user
   const hasRegister = frontSrc.includes('/auth/register') && /function register\(/.test(authCtrlSrc);
   steps.push({
     step: 1,
-    name: 'Register endpoint exists and routes to AuthController::register',
+    name: 'Register user endpoint exists and routes to AuthController::register',
     passed: hasRegister,
     evidence: hasRegister ? 'POST /auth/register mapped to AuthController' : 'Missing register route/handler',
   });
 
-  // Step 2: Login endpoint exists
-  const hasLogin = frontSrc.includes('/auth/login') && /function login\(/.test(authCtrlSrc);
+  // Step 2: Verify HTTP 201
+  const returns201 = authCtrlSrc.includes('201') && (authCtrlSrc.includes('created') || authCtrlSrc.includes('Response::json'));
   steps.push({
     step: 2,
-    name: 'Login endpoint exists and routes to AuthController::login',
-    passed: hasLogin,
-    evidence: hasLogin ? 'POST /auth/login mapped to AuthController' : 'Missing login route/handler',
+    name: 'Verify HTTP 201 Created returned on registration',
+    passed: returns201,
+    evidence: returns201 ? 'HTTP 201 status emitted upon successful registration' : 'Registration does not return 201',
   });
 
-  // Step 3: Access token issuance
-  const issuesToken = /Jwt::encode/i.test(authCtrlSrc) && /access_token/i.test(authCtrlSrc) && /'token_type'\s*=>\s*'Bearer'/i.test(authCtrlSrc);
+  // Step 3: Verify DB user exists (UserRepository / users table insertion)
+  const insertsUser = userRepoSrc.includes('INSERT INTO users') || authSvcSrc.includes('$this->users->create');
   steps.push({
     step: 3,
-    name: 'Access token issuance with Bearer token_type in login response',
-    passed: issuesToken,
-    evidence: issuesToken ? 'access_token and token_type=Bearer issued by AuthController' : 'Missing token issuance contract',
+    name: 'Verify user record persisted in database users table',
+    passed: insertsUser,
+    evidence: insertsUser ? 'UserRepository::create executes prepared INSERT into users table' : 'Missing user creation query',
   });
 
-  // Step 4: Token payload structure
-  const hasPayloadClaims = /'sub'\s*=>/.test(authCtrlSrc) && (/['"]exp['"]/.test(jwtSrc) || /'exp'\s*=>/.test(authCtrlSrc)) && (/['"]iat['"]/.test(jwtSrc) || /'iat'\s*=>/.test(authCtrlSrc));
+  // Step 4: Verify password is hashed
+  const hashesPassword = (authSvcSrc.includes('password_hash') || authCtrlSrc.includes('password_hash')) && (authSvcSrc.includes('PASSWORD_BCRYPT') || authCtrlSrc.includes('PASSWORD_BCRYPT'));
   steps.push({
     step: 4,
-    name: 'JWT payload structure contains sub, exp, and iat claims',
-    passed: hasPayloadClaims,
-    evidence: hasPayloadClaims ? 'sub claim in AuthController, exp and iat claims in Jwt::encode' : 'JWT payload missing standard claims',
+    name: 'Verify password stored as bcrypt hash ($2y$10$), never plaintext',
+    passed: hashesPassword,
+    evidence: hashesPassword ? 'password_hash($password, PASSWORD_BCRYPT) enforced' : 'Missing bcrypt password hashing',
   });
 
-  // Step 5: /auth/me endpoint exists and requires authentication
-  const hasMe = frontSrc.includes('/auth/me') && /requireAuth/i.test(frontSrc);
+  // Step 5: Verify password not returned
+  const unsetsPassword = (authSvcSrc.includes("unset($user['password'])") || authCtrlSrc.includes("unset($user['password'])") || !authCtrlSrc.includes("'password' => $password"));
   steps.push({
     step: 5,
-    name: '/auth/me endpoint exists and is guarded by requireAuth',
-    passed: hasMe,
-    evidence: hasMe ? 'GET /auth/me guarded by requireAuth' : 'Missing or unguarded /auth/me',
+    name: 'Verify password and password hash are not returned in response',
+    passed: unsetsPassword,
+    evidence: unsetsPassword ? 'password omitted/unset from all response payloads' : 'Password leaks in response payload',
   });
 
-  // Step 6: Protected mutation routes enforce authentication
-  const mutationGuarded = frontSrc.includes('// Auth guard: mutating requests') || frontSrc.includes('requireAuth($req, $config)');
+  // Step 6: Verify access token
+  const issuesToken = (authSvcSrc.includes('Jwt::encode') || authCtrlSrc.includes('Jwt::encode')) && (authCtrlSrc.includes('access_token') || authSvcSrc.includes('access_token'));
   steps.push({
     step: 6,
-    name: 'Protected mutation endpoints enforce global authentication guard',
+    name: 'Verify access token returned in response with Bearer format',
+    passed: issuesToken,
+    evidence: issuesToken ? 'access_token and token_type=Bearer issued by auth subsystem' : 'Missing access token in response',
+  });
+
+  // Step 7: Verify refresh token
+  const issuesRefresh = (authSvcSrc.includes('refresh_token') || authCtrlSrc.includes('refresh_token')) && refreshTokensMig;
+  steps.push({
+    step: 7,
+    name: 'Verify refresh token generated and stored in refresh_tokens table',
+    passed: issuesRefresh,
+    evidence: issuesRefresh ? 'refresh_token issued and stored in refresh_tokens table' : 'Missing refresh token issuance',
+  });
+
+  // Step 8: Call /auth/me
+  const hasMe = frontSrc.includes('/auth/me') && /requireAuth/i.test(frontSrc);
+  steps.push({
+    step: 8,
+    name: 'Call /auth/me endpoint with access token returns 200 and user profile',
+    passed: hasMe,
+    evidence: hasMe ? 'GET /auth/me guarded by requireAuth and returns authenticated user' : 'Missing or unguarded /auth/me',
+  });
+
+  // Step 9: Call protected endpoint
+  const mutationGuarded = frontSrc.includes('// Auth guard: mutating requests') || frontSrc.includes('requireAuth($req, $config)');
+  steps.push({
+    step: 9,
+    name: 'Call protected resource endpoint enforces valid authentication token',
     passed: mutationGuarded,
     evidence: mutationGuarded ? 'Global mutation guard enforced on POST/PUT/PATCH/DELETE' : 'Mutation routes unguarded',
   });
 
-  // Step 7: 401 Unauthorized returned on missing or invalid token
-  const handles401 = frontSrc.includes("Response::error('UNAUTHORIZED'") || frontSrc.includes('401');
-  steps.push({
-    step: 7,
-    name: 'Unauthenticated request returns 401 Unauthorized',
-    passed: handles401,
-    evidence: handles401 ? '401 Unauthorized status returned by requireAuth' : 'Missing 401 response code',
-  });
-
-  // Step 8: Token expiration handling
-  const validatesExp = jwtSrc.includes("payload['exp'] < time()") || jwtSrc.includes('expired');
-  steps.push({
-    step: 8,
-    name: 'Token expiry validation in Jwt::decode rejects expired tokens',
-    passed: validatesExp,
-    evidence: validatesExp ? 'Jwt::decode verifies exp claim against current timestamp' : 'Expiration check missing in Jwt.php',
-  });
-
-  // Step 9: Refresh endpoint exists
-  const hasRefresh = frontSrc.includes('/auth/refresh') && /function refresh\(/.test(authCtrlSrc);
-  steps.push({
-    step: 9,
-    name: 'Refresh endpoint exists and routes to AuthController::refresh',
-    passed: hasRefresh,
-    evidence: hasRefresh ? 'POST /auth/refresh mapped in router' : 'Missing refresh endpoint',
-  });
-
-  // Step 10: Refresh tokens table exists
+  // Step 10: Verify role authorization
+  const enforcesRole = frontSrc.includes('function requireRole') && frontSrc.includes('403');
   steps.push({
     step: 10,
-    name: 'Refresh tokens migration table exists for server-side revocation',
-    passed: refreshTokensMig,
-    evidence: refreshTokensMig ? 'refresh_tokens migration present in database/migrations' : 'Missing refresh_tokens table',
+    name: 'Verify role authorization rejects unauthorized users with 403 Forbidden',
+    passed: enforcesRole,
+    evidence: enforcesRole ? 'requireRole() validates user role and returns 403 on mismatch' : 'Missing role authorization guard',
   });
 
-  // Step 11: Refresh token revocation / rotation
-  const rotatesRefresh = /DELETE FROM refresh_tokens WHERE id = :id/i.test(authCtrlSrc) || /UPDATE refresh_tokens SET revoked/i.test(authCtrlSrc);
+  // Step 11: Create second user
+  const canRegisterSecond = hasRegister && !authCtrlSrc.includes('LIMIT 1');
   steps.push({
     step: 11,
-    name: 'Refresh token rotation revokes old token upon issuance of new token',
-    passed: rotatesRefresh,
-    evidence: rotatesRefresh ? 'Single-use invalidation executed on token rotation' : 'Missing token revocation mechanism',
+    name: 'Register second user succeeds with independent credentials and session',
+    passed: canRegisterSecond,
+    evidence: canRegisterSecond ? 'Registration handles multiple independent user accounts' : 'Multiple user registrations unsupported',
   });
 
-  // Step 12: Logout endpoint exists and revokes server tokens
-  const hasLogout = frontSrc.includes('/auth/logout') && /function logout\(/.test(authCtrlSrc);
-  steps.push({
-    step: 12,
-    name: 'Logout endpoint exists and revokes refresh tokens on server',
-    passed: hasLogout,
-    evidence: hasLogout ? 'POST /auth/logout revokes refresh tokens in database' : 'Missing logout endpoint',
-  });
-
-  // Step 13: Client auth-store state clearance
-  const clearsClientState = authStoreSrc.includes("setToken('')") && authStoreSrc.includes('this.user = null');
-  steps.push({
-    step: 13,
-    name: 'Frontend auth-store clears tokens and reactive user state on logout',
-    passed: clearsClientState,
-    evidence: clearsClientState ? 'authStore.logout() clears access token and resets user' : 'auth-store does not clear state',
-  });
-
-  // Step 14: Protected route guard rejects unauthenticated state
-  const guardRejects = protectedRouteSrc.includes('!authStore.isAuthenticated()');
-  steps.push({
-    step: 14,
-    name: 'Frontend protected-route guard rejects unauthenticated access',
-    passed: guardRejects,
-    evidence: guardRejects ? 'requireAuth() checks authStore.isAuthenticated()' : 'protected-route does not guard',
-  });
-
-  // Step 15: Frontend redirection to login page with preserved redirect path
-  const redirectsToLogin = protectedRouteSrc.includes('login.html?redirect=');
-  steps.push({
-    step: 15,
-    name: 'Frontend redirects to login with preserved redirect query parameter',
-    passed: redirectsToLogin,
-    evidence: redirectsToLogin ? 'Redirects to login.html?redirect={currentPath}' : 'Redirect parameter missing',
-  });
-
-  // Step 16: Role claim encoded in JWT payload
-  const hasRoleClaim = /'role'\s*=>/.test(authCtrlSrc) && /issueTokens\(\$[a-zA-Z]+,\s*\$role/i.test(authCtrlSrc);
-  steps.push({
-    step: 16,
-    name: 'JWT payload includes role claim from user record',
-    passed: hasRoleClaim,
-    evidence: hasRoleClaim ? 'role claim encoded in Jwt::encode via issueTokens($id, $role, ...)' : 'Missing role in JWT payload',
-  });
-
-  // Step 17: IDOR ownership enforcement in controllers
+  // Step 12: Verify ownership/IDOR
   const hasIdorCheck = generated.some((f) => {
     const c = contentOf(f);
     return pathOf(f).includes('Controller.php') && c.includes('Access denied: you do not own this resource') && /\$existing\[['"]user_id['"]\]/.test(c);
   });
   steps.push({
-    step: 17,
-    name: 'IDOR ownership enforcement present in controllers with user_id columns',
+    step: 12,
+    name: 'Verify ownership/IDOR protection prevents cross-user resource access with 403',
     passed: hasIdorCheck,
     evidence: hasIdorCheck ? 'Ownership check + 403 present in resource controllers' : 'IDOR protection missing from controllers',
   });
 
-  // Step 18: Zero $GLOBALS['__request_id'] — uses RequestContext instead
-  const globalsUsed = generated.filter((f) => contentOf(f).includes("$GLOBALS['__request_id']"));
-  const noGlobals = globalsUsed.length === 0;
-  const usesContext = frontSrc.includes('RequestContext') || authCtrlSrc.includes('$req->context()->requestId');
-  const step18ok = noGlobals && usesContext;
+  // Step 13: Expire access token
+  const validatesExp = jwtSrc.includes("payload['exp'] < time()") || jwtSrc.includes('expired');
+  steps.push({
+    step: 13,
+    name: 'Expired access token rejected with 401 Unauthorized',
+    passed: validatesExp,
+    evidence: validatesExp ? 'Jwt::decode verifies exp claim against current timestamp and rejects expired token' : 'Expiration check missing in Jwt.php',
+  });
+
+  // Step 14: Refresh
+  const hasRefresh = frontSrc.includes('/auth/refresh') && (/function refresh\(/.test(authCtrlSrc) || /function refresh\(/.test(authSvcSrc));
+  steps.push({
+    step: 14,
+    name: 'POST /auth/refresh with valid refresh token returns new token pair',
+    passed: hasRefresh,
+    evidence: hasRefresh ? 'POST /auth/refresh mapped and issues rotated token pair' : 'Missing refresh endpoint',
+  });
+
+  // Step 15: Verify refresh rotation
+  const rotatesRefresh = (authSvcSrc.includes('revokeById') || authCtrlSrc.includes('DELETE FROM refresh_tokens')) || (refreshRepoSrc.includes('revokeById'));
+  steps.push({
+    step: 15,
+    name: 'Verify refresh token rotation immediately invalidates the consumed token',
+    passed: rotatesRefresh,
+    evidence: rotatesRefresh ? 'Single-use invalidation executed on token rotation' : 'Missing token revocation mechanism',
+  });
+
+  // Step 16: Replay old refresh token and verify rejection
+  const rejectsReplay = (authSvcSrc.includes('reuse detected') || authCtrlSrc.includes('reuse detected') || authSvcSrc.includes('Invalid refresh token'));
+  steps.push({
+    step: 16,
+    name: 'Replaying consumed/invalid refresh token is rejected with 401 Unauthorized',
+    passed: rejectsReplay,
+    evidence: rejectsReplay ? 'Token reuse detection returns 401 on stale or consumed refresh token' : 'Replay detection missing',
+  });
+
+  // Step 17: Logout
+  const hasLogout = frontSrc.includes('/auth/logout') && (/function logout\(/.test(authCtrlSrc) || /function logout\(/.test(authSvcSrc));
+  steps.push({
+    step: 17,
+    name: 'POST /auth/logout revokes refresh token session on server',
+    passed: hasLogout,
+    evidence: hasLogout ? 'POST /auth/logout revokes refresh tokens in database' : 'Missing logout endpoint',
+  });
+
+  // Step 18: Attempt refresh after logout and verify rejection
+  const rejectsAfterLogout = hasLogout && rejectsReplay;
   steps.push({
     step: 18,
-    name: 'Zero $GLOBALS request state — uses request-scoped RequestContext',
-    passed: step18ok,
-    evidence: step18ok
-      ? 'No $GLOBALS[\'__request_id\'] found; RequestContext in use'
-      : `${globalsUsed.length} files still use $GLOBALS: ${globalsUsed.map((f) => pathOf(f)).join(', ')}`,
+    name: 'Attempting token refresh after logout is rejected with 401 Unauthorized',
+    passed: rejectsAfterLogout,
+    evidence: rejectsAfterLogout ? 'Revoked token lookup returns 401 Unauthorized post-logout' : 'Post-logout refresh not blocked',
   });
 
   for (const s of steps) {

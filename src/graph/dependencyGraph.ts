@@ -227,11 +227,60 @@ export function buildApplicationDependencyGraph(
       type: 'auth-subsystem',
       label: 'Authentication Subsystem',
       description: 'End-to-end user authentication, bcrypt password hashing, token issuance, refresh rotation, and revocation',
-      files: ['backend/controllers/AuthController.php'],
+      files: ['backend/controllers/AuthController.php', 'backend/services/AuthService.php'],
       routes: routeStrings,
       entities: ['users', 'refresh_tokens'],
     });
     g.addEdge({ from: 'api', to: 'authentication', type: 'ROUTES_TO' });
+    g.addEdge({ from: 'authentication', to: 'api', type: 'PROTECTS', label: 'token guard' });
+
+    // Auth Controller Node
+    g.addNode({
+      id: 'auth-controller',
+      type: 'controller',
+      label: 'AuthController',
+      description: 'HTTP controller with constructor-injected AuthService',
+      files: ['backend/controllers/AuthController.php'],
+      routes: routeStrings,
+      entities: [],
+    });
+    g.addEdge({ from: 'authentication', to: 'auth-controller', type: 'USES' });
+
+    // Auth Service Node
+    g.addNode({
+      id: 'auth-service',
+      type: 'service',
+      label: 'AuthService',
+      description: 'Domain business logic for credential validation, token rotation, and immutable role policies',
+      files: ['backend/services/AuthService.php'],
+      routes: [],
+      entities: ['users', 'refresh_tokens'],
+    });
+    g.addEdge({ from: 'auth-controller', to: 'auth-service', type: 'USES' });
+
+    // User Repository Node
+    g.addNode({
+      id: 'user-repository',
+      type: 'repository',
+      label: 'UserRepository',
+      description: 'Data access repository for user credentials and role queries',
+      files: ['backend/repositories/UserRepository.php'],
+      routes: [],
+      entities: ['users'],
+    });
+    g.addEdge({ from: 'auth-service', to: 'user-repository', type: 'USES' });
+
+    // Refresh Token Repository Node
+    g.addNode({
+      id: 'refresh-token-repository',
+      type: 'repository',
+      label: 'RefreshTokenRepository',
+      description: 'Data access repository for refresh token persistence, lookup, and single-use revocation',
+      files: ['backend/repositories/RefreshTokenRepository.php'],
+      routes: [],
+      entities: ['refresh_tokens'],
+    });
+    g.addEdge({ from: 'auth-service', to: 'refresh-token-repository', type: 'USES' });
 
     // JWT Provider Node (Pure cryptographic token operations — NO DATABASE ACCESS)
     g.addNode({
@@ -243,7 +292,8 @@ export function buildApplicationDependencyGraph(
       routes: [],
       entities: [],
     });
-    g.addEdge({ from: 'authentication', to: 'jwt', type: 'USES', label: 'cryptographic signing/verification' });
+    g.addEdge({ from: 'auth-service', to: 'jwt', type: 'USES', label: 'cryptographic signing/verification' });
+    g.addEdge({ from: 'authentication', to: 'jwt', type: 'USES' });
 
     // Users Entity Node
     g.addNode({
@@ -255,6 +305,8 @@ export function buildApplicationDependencyGraph(
       routes: [`${prefix}/users`],
       entities: ['users'],
     });
+    g.addEdge({ from: 'user-repository', to: 'users', type: 'READS' });
+    g.addEdge({ from: 'user-repository', to: 'users', type: 'WRITES' });
     g.addEdge({ from: 'authentication', to: 'users', type: 'READS' });
     g.addEdge({ from: 'authentication', to: 'users', type: 'WRITES' });
     g.addEdge({ from: 'users', to: 'mysql', type: 'PERSISTS_TO' });
@@ -269,6 +321,8 @@ export function buildApplicationDependencyGraph(
       routes: [`${prefix}/auth/refresh`],
       entities: ['refresh_tokens'],
     });
+    g.addEdge({ from: 'refresh-token-repository', to: 'refresh_tokens', type: 'READS' });
+    g.addEdge({ from: 'refresh-token-repository', to: 'refresh_tokens', type: 'WRITES' });
     g.addEdge({ from: 'authentication', to: 'refresh_tokens', type: 'READS' });
     g.addEdge({ from: 'authentication', to: 'refresh_tokens', type: 'WRITES' });
     g.addEdge({ from: 'refresh_tokens', to: 'mysql', type: 'PERSISTS_TO' });
@@ -355,27 +409,46 @@ export function validateSystemMapGraph(
   }
 
   if (state.auth.strategy === 'jwt') {
-    // Invariant 3: Auth Subsystem must exist
+    // Invariant 3: Auth Subsystem nodes must exist
     if (!graph.hasNode('authentication')) errors.push('Dependency Graph missing "authentication" subsystem node');
+    if (!graph.hasNode('auth-controller')) errors.push('Dependency Graph missing "auth-controller" node');
+    if (!graph.hasNode('auth-service')) errors.push('Dependency Graph missing "auth-service" node');
+    if (!graph.hasNode('user-repository')) errors.push('Dependency Graph missing "user-repository" node');
+    if (!graph.hasNode('refresh-token-repository')) errors.push('Dependency Graph missing "refresh-token-repository" node');
     if (!graph.hasNode('jwt')) errors.push('Dependency Graph missing "jwt" provider node');
     if (!graph.hasNode('users')) errors.push('Dependency Graph missing "users" entity node');
     if (!graph.hasNode('refresh_tokens')) errors.push('Dependency Graph missing "refresh_tokens" entity node');
 
     // Invariant 4: Auth subsystem relationships
-    if (!graph.hasEdge('authentication', 'jwt', 'USES')) {
-      errors.push('Missing edge: authentication -> jwt (USES)');
+    if (!graph.hasEdge('authentication', 'auth-controller')) {
+      errors.push('Missing edge: authentication -> auth-controller');
     }
-    if (!graph.hasEdge('authentication', 'users')) {
-      errors.push('Missing edge: authentication -> users');
+    if (!graph.hasEdge('auth-controller', 'auth-service')) {
+      errors.push('Missing edge: auth-controller -> auth-service');
     }
-    if (!graph.hasEdge('authentication', 'refresh_tokens')) {
-      errors.push('Missing edge: authentication -> refresh_tokens');
+    if (!graph.hasEdge('auth-service', 'jwt')) {
+      errors.push('Missing edge: auth-service -> jwt');
+    }
+    if (!graph.hasEdge('auth-service', 'user-repository')) {
+      errors.push('Missing edge: auth-service -> user-repository');
+    }
+    if (!graph.hasEdge('auth-service', 'refresh-token-repository')) {
+      errors.push('Missing edge: auth-service -> refresh-token-repository');
+    }
+    if (!graph.hasEdge('user-repository', 'users')) {
+      errors.push('Missing edge: user-repository -> users');
+    }
+    if (!graph.hasEdge('refresh-token-repository', 'refresh_tokens')) {
+      errors.push('Missing edge: refresh-token-repository -> refresh_tokens');
     }
     if (!graph.hasEdge('users', 'mysql', 'PERSISTS_TO')) {
       errors.push('Missing edge: users -> mysql (PERSISTS_TO)');
     }
     if (!graph.hasEdge('refresh_tokens', 'mysql', 'PERSISTS_TO')) {
       errors.push('Missing edge: refresh_tokens -> mysql (PERSISTS_TO)');
+    }
+    if (!graph.hasEdge('authentication', 'api', 'PROTECTS')) {
+      errors.push('Missing edge: authentication -> api (PROTECTS)');
     }
 
     // Invariant 5: CRITICAL — JWT MUST NEVER HAVE A DIRECT PERSISTENCE/DATABASE EDGE TO MYSQL!

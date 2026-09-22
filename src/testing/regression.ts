@@ -368,5 +368,67 @@ export function runRegressionTests(): RegressionResult[] {
       : routeCheck.errors.join('; '),
   });
 
+  // 31. PUBLIC_REGISTRATION_ROLE_IMMUTABLE — registration role is immutable 'user'
+  const authSvcCode = byPath('backend/services/AuthService.php');
+  const authCtrlCode = byPath('backend/controllers/AuthController.php');
+  const roleImmutable = authSvcCode.includes("$role = 'user';") && !authCtrlCode.includes("$b['role']");
+  out.push({
+    name: 'Public registration role is immutable (role=user, no admin escalation)',
+    passed: roleImmutable,
+    detail: roleImmutable
+      ? 'clean — role hardcoded to user, caller role parameter ignored/omitted'
+      : 'caller role parameter parsed or not locked to user',
+  });
+
+  // 32. AUTH_SERVICES_AND_REPOSITORIES_GENERATED — real generated layers
+  const hasUserRepo = files.some((f) => f.path === 'backend/repositories/UserRepository.php');
+  const hasRefreshRepo = files.some((f) => f.path === 'backend/repositories/RefreshTokenRepository.php');
+  const hasAuthSvc = files.some((f) => f.path === 'backend/services/AuthService.php');
+  const reposSvcOk = hasUserRepo && hasRefreshRepo && hasAuthSvc;
+  out.push({
+    name: 'Authentication subsystem generates UserRepository, RefreshTokenRepository, and AuthService',
+    passed: reposSvcOk,
+    detail: reposSvcOk
+      ? 'all 3 architectural layers generated (UserRepository, RefreshTokenRepository, AuthService)'
+      : `missing: ${[!hasUserRepo && 'UserRepository', !hasRefreshRepo && 'RefreshTokenRepository', !hasAuthSvc && 'AuthService'].filter(Boolean).join(', ')}`,
+  });
+
+  // 33. CONSTRUCTOR_INJECTION_PURITY — business classes do not call Container::getInstance() or db()
+  const businessClasses = [authCtrlCode, authSvcCode, byPath('backend/repositories/UserRepository.php'), byPath('backend/repositories/RefreshTokenRepository.php')];
+  const businessPurity = businessClasses.every((c) => !c.includes('Container::getInstance()') && !c.includes('db()'));
+  out.push({
+    name: 'Business classes use constructor injection with zero Container::getInstance() or db() calls',
+    passed: businessPurity,
+    detail: businessPurity
+      ? 'clean constructor injection across all controllers, services, and repositories'
+      : 'service locator or db() found inside business logic',
+  });
+
+  // 34. CANONICAL_HEALTH_ROUTES_NO_DUPLICATION — single canonical health contract
+  const frontCode = byPath('backend/public/index.php');
+  const hasRootHealth = frontCode.includes("$router->add('GET', '/health'");
+  const hasPrefixedHealth = frontCode.includes(`'${blog.config.apiPrefix}/health'`);
+  const healthClean = hasRootHealth && !hasPrefixedHealth;
+  out.push({
+    name: 'Health routes follow single canonical contract outside /api/v1 without duplication',
+    passed: healthClean,
+    detail: healthClean
+      ? 'canonical root /health, /health/live, /health/ready without /api/v1 duplicate'
+      : 'health routes duplicated or missing from root',
+  });
+
+  // 35. GRAPH_AUTH_STACK_COMPLETENESS — dependency graph reflects real generated layers
+  const hasAuthServiceNode = depGraph.hasNode('auth-service');
+  const hasUserRepoNode = depGraph.hasNode('user-repository');
+  const hasRefreshRepoNode = depGraph.hasNode('refresh-token-repository');
+  const graphComplete = hasAuthServiceNode && hasUserRepoNode && hasRefreshRepoNode && depGraph.hasEdge('auth-controller', 'auth-service') && depGraph.hasEdge('auth-service', 'user-repository');
+  out.push({
+    name: 'Dependency graph reflects real generated AuthService and Repository layers',
+    passed: graphComplete,
+    detail: graphComplete
+      ? 'graph models real AuthService and Repository nodes & edges'
+      : 'graph missing real layer representations',
+  });
+
   return out;
 }
