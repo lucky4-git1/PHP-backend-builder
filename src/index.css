@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 99%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 262 83% 58%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 262 83% 58%;
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 5.9% 10%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 5.9% 10%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 263 70% 68%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 263 70% 68%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    font-family: "Inter", system-ui, -apple-system, sans-serif;
+    letter-spacing: -0.01em;
+  }
+  h1, h2, h3 { letter-spacing: -0.02em; font-weight: 650; }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / 0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.35); }
+
+/* Focus */
+*:focus-visible { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background; }
+
+/* Animations */
+@keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+@keyframes pulse-subtle { 0%,100% { opacity: 1; } 50% { opacity: 0.8; } }
+
+@layer components {
+  .panel { @apply bg-card border border-border rounded-xl shadow-[0_1px_2px_rgba(0,0,0,0.04),0_4px_12px_rgba(0,0,0,0.04)] backdrop-blur-sm; }
+  .panel-header { @apply px-5 py-4 border-b border-border/60 bg-muted/30; }
+  .panel-content { @apply p-5; }
+  .glass { @apply bg-white/80 dark:bg-zinc-900/70 backdrop-blur-xl border border-zinc-200/50 dark:border-zinc-800/50; }
+  .code-panel { @apply bg-zinc-950 text-zinc-100 border-zinc-800 rounded-xl overflow-hidden; }
+  .status-dot { @apply h-2 w-2 rounded-full animate-pulse; }
+}
+
+/* Card enhancements */
+.card-hover { @apply transition-all duration-200 hover:shadow-[0_4px_16px_rgba(0,0,0,0.08)] hover:border-zinc-300 dark:hover:border-zinc-700; }
+
+/* Mermaid */
+.mermaid-container { @apply bg-card border border-border rounded-xl p-4 overflow-auto; }
+
+/* Diff */
+.diff-line { @apply px-3 py-0.5 text-xs font-mono whitespace-pre-wrap border-l-4; }
+.diff-added { @apply bg-emerald-50 border-emerald-500 text-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300; }
+.diff-removed { @apply bg-red-50 border-red-500 text-red-900 dark:bg-red-950/30 dark:text-red-300; }
+.diff-unchanged { @apply bg-transparent border-transparent text-muted-foreground; }
