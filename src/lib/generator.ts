@@ -179,8 +179,10 @@ function controllerFor(t: BuilderTable, perPage: number, isAuthResource = false)
   const rulesBlock = validationRulesFor(t);
   // Auth-specific behavior ONLY on User/Auth resources (regression: password logic
   // must never leak into ContactController etc.)
+  // Phase 4: Strip 'role' from mass-assignment to prevent role escalation via CRUD.
+  // Admin role assignment is handled separately through the admin user-creation endpoint.
   const mutateBody = isAuthResource
-    ? "        if (isset($data['password']) && $data['password'] !== '') {\n            $data['password'] = password_hash((string)$data['password'], PASSWORD_BCRYPT);\n        } else { unset($data['password']); }\n        if (isset($data['email'])) { $data['email'] = strtolower(trim((string)$data['email'])); }\n        return $data;"
+    ? "        // Phase 4: strip role from non-admin requests to prevent privilege escalation\n        unset($data['role']);\n        if (isset($data['password']) && $data['password'] !== '') {\n            $data['password'] = password_hash((string)$data['password'], PASSWORD_BCRYPT);\n        } else { unset($data['password']); }\n        if (isset($data['email'])) { $data['email'] = strtolower(trim((string)$data['email'])); }\n        return $data;"
     : "        if (isset($data['email'])) { $data['email'] = strtolower(trim((string)$data['email'])); }\n        return $data;";
   const sortCols = Array.from(new Set(['id', 'created_at', 'updated_at', ...t.columns.map((c) => c.name).filter((n) => !['password', 'key_hash'].includes(n))]));
   const allowedSortsStr = "['" + sortCols.join("', '") + "']";
@@ -416,14 +418,19 @@ const SUPPORT_MODEL_LINES: string[] = [
   '    protected static bool $softDeletes = false;',
   '    protected static array $fillable = [];',
   '    protected static array $casts = [];',
+  '    protected static ?\\PDO $connection = null;',
   '',
-  '    protected static function pdo(): PDO',
+  '    public static function setConnection(\\PDO $pdo): void',
   '    {',
-  '        $c = Container::getInstance();',
-  "        if ($c->has(PDO::class)) {",
-  '            return $c->get(PDO::class);',
+  '        static::$connection = $pdo;',
+  '    }',
+  '',
+  '    protected static function pdo(): \\PDO',
+  '    {',
+  '        if (static::$connection !== null) {',
+  '            return static::$connection;',
   '        }',
-  '        return db();',
+  "        throw new \\RuntimeException('Database connection not initialized. Set via Model::setConnection(\\PDO).');",
   '    }',
   '',
   '    protected static function filter(array $data): array',
@@ -1164,11 +1171,53 @@ export function generateProject(state: BuilderState): GenFile[] {
     ];
     files.push({ path: 'backend/repositories/RefreshTokenRepository.php', language: 'php', content: refreshRepoLines.join('\n') + '\n' });
 
+    // 2B. Password Reset Token Repository (Phase 5/6: real token verification)
+    if (state.auth.forgotPassword || state.auth.resetPassword) {
+      const resetTokenRepoLines: string[] = [
+        header('Repository: Password reset token persistence — hashed, expiring, one-time use', 'App\\Repositories').trimEnd(),
+        'use PDO;',
+        '',
+        'final class PasswordResetTokenRepository',
+        '{',
+        '    public function __construct(private PDO $pdo) {}',
+        '',
+        '    public function create(string $email, string $tokenHash, int $ttlMinutes = 60): void',
+        '    {',
+        "        // Delete any existing tokens for this email (one active token at a time)",
+        "        $this->pdo->prepare('DELETE FROM password_reset_tokens WHERE email = :e')->execute([':e' => $email]);",
+        "        $st = $this->pdo->prepare('INSERT INTO password_reset_tokens (email, token_hash, expires_at) VALUES (:e, :h, DATE_ADD(NOW(), INTERVAL :m MINUTE))');",
+        "        $st->execute([':e' => $email, ':h' => $tokenHash, ':m' => $ttlMinutes]);",
+        '    }',
+        '',
+        '    public function findByTokenHash(string $tokenHash): ?array',
+        '    {',
+        "        $st = $this->pdo->prepare('SELECT * FROM password_reset_tokens WHERE token_hash = :h AND expires_at > NOW() LIMIT 1');",
+        "        $st->execute([':h' => $tokenHash]);",
+        '        $row = $st->fetch(PDO::FETCH_ASSOC);',
+        '        return $row ?: null;',
+        '    }',
+        '',
+        '    public function deleteByEmail(string $email): void',
+        '    {',
+        "        $this->pdo->prepare('DELETE FROM password_reset_tokens WHERE email = :e')->execute([':e' => $email]);",
+        '    }',
+        '',
+        '    public function deleteExpired(): void',
+        '    {',
+        "        $this->pdo->exec('DELETE FROM password_reset_tokens WHERE expires_at <= NOW()');",
+        '    }',
+        '}',
+      ];
+      files.push({ path: 'backend/repositories/PasswordResetTokenRepository.php', language: 'php', content: resetTokenRepoLines.join('\n') + '\n' });
+    }
+
     // 3. Auth Service
+    const hasPasswordReset = Boolean(state.auth.forgotPassword || state.auth.resetPassword);
     const authServiceLines: string[] = [
       header('Service: Authentication business logic, token rotation, and credential verification', 'App\\Services').trimEnd(),
       'use App\\Repositories\\UserRepository;',
       'use App\\Repositories\\RefreshTokenRepository;',
+      ...(hasPasswordReset ? ['use App\\Repositories\\PasswordResetTokenRepository;'] : []),
       'use App\\Support\\Jwt;',
       'use App\\Support\\RequestContext;',
       'use PDO;',
@@ -1181,7 +1230,7 @@ export function generateProject(state: BuilderState): GenFile[] {
       '        private UserRepository $users,',
       '        private RefreshTokenRepository $refreshTokens,',
       '        private PDO $pdo,',
-      '        private array $config',
+      '        private array $config,' + (hasPasswordReset ? '\n        private ?PasswordResetTokenRepository $resetTokens = null' : ''),
       '    ) {}',
       '',
       '    public function register(string $name, string $email, string $password, RequestContext $context): array',
@@ -1321,29 +1370,58 @@ export function generateProject(state: BuilderState): GenFile[] {
         '',
         '    public function requestPasswordReset(string $email, RequestContext $context): array',
         '    {',
+        '        $email = strtolower(trim($email));',
         '        $user = $this->users->findByEmail($email);',
         '        if (!$user) {',
         "            password_verify('dummy', '$2y$10$abcdefghijklmnopqrstuu');",
         "            return ['message' => 'If that email exists, a password reset link has been dispatched.'];",
         '        }',
-        "        return ['message' => 'If that email exists, a password reset link has been dispatched.'];",
+        '        $rawToken = bin2hex(random_bytes(32));',
+        "        $tokenHash = hash('sha256', $rawToken);",
+        '        if ($this->resetTokens !== null) {',
+        '            $this->resetTokens->create($email, $tokenHash, 60);',
+        '        }',
+        '        return [',
+        "            'message' => 'If that email exists, a password reset link has been dispatched.',",
+        "            'reset_token' => $rawToken,",
+        '        ];',
         '    }',
         '',
-        '    public function resetPassword(string $email, string $newPassword, RequestContext $context): array',
+        '    public function resetPassword(string $email, string $token, string $newPassword, RequestContext $context): array',
         '    {',
+        '        $email = strtolower(trim($email));',
+        '        $token = trim($token);',
         '        if (strlen($newPassword) < 8) {',
         "            throw new InvalidArgumentException('Password must be at least 8 characters');",
+        '        }',
+        "        if ($token === '') {",
+        "            throw new InvalidArgumentException('Reset token is required');",
+        '        }',
+        "        $tokenHash = hash('sha256', $token);",
+        '        $record = $this->resetTokens !== null ? $this->resetTokens->findByTokenHash($tokenHash) : null;',
+        "        if (!$record || strtolower((string)$record['email']) !== $email) {",
+        "            throw new RuntimeException('Invalid or expired reset token');",
         '        }',
         '        $user = $this->users->findByEmail($email);',
         '        if (!$user) {',
         "            throw new RuntimeException('User not found or invalid reset request');",
         '        }',
         '        $hash = password_hash($newPassword, PASSWORD_BCRYPT);',
-        '        $updated = $this->users->updatePasswordByEmail($email, $hash);',
-        '        if (!$updated) {',
-        "            throw new RuntimeException('Failed to update password');",
+        '        $this->pdo->beginTransaction();',
+        '        try {',
+        '            $updated = $this->users->updatePasswordByEmail($email, $hash);',
+        '            if (!$updated) {',
+        "                throw new RuntimeException('Failed to update password');",
+        '            }',
+        '            if ($this->resetTokens !== null) {',
+        '                $this->resetTokens->deleteByEmail($email);',
+        '            }',
+        '            $this->pdo->commit();',
+        "            return ['message' => 'Password reset successful. You may now login.'];",
+        '        } catch (\\Throwable $e) {',
+        '            if ($this->pdo->inTransaction()) $this->pdo->rollBack();',
+        '            throw $e;',
         '        }',
-        "        return ['message' => 'Password reset successful. You may now login.'];",
         '    }'
       );
     }
@@ -1470,12 +1548,12 @@ export function generateProject(state: BuilderState): GenFile[] {
         "        $email = strtolower(trim((string)($b['email'] ?? '')));",
         "        $token = trim((string)($b['token'] ?? ''));",
         "        $password = (string)($b['password'] ?? '');",
-        "        if ($email === '' || strlen($password) < 8) {",
-        "            Response::error('VALIDATION_ERROR', 'Email and minimum 8-character password required', 422, [], $req->context()->requestId);",
+        "        if ($email === '' || $token === '' || strlen($password) < 8) {",
+        "            Response::error('VALIDATION_ERROR', 'Email, token, and minimum 8-character password required', 422, [], $req->context()->requestId);",
         '            return;',
         '        }',
         '        try {',
-        '            $res = $this->authService->resetPassword($email, $password, $req->context());',
+        '            $res = $this->authService->resetPassword($email, $token, $password, $req->context());',
         "            Response::json(['success' => true, 'data' => $res], 200, $req->context()->requestId);",
         '        } catch (InvalidArgumentException $e) {',
         "            Response::error('VALIDATION_ERROR', $e->getMessage(), 422, [], $req->context()->requestId);",
@@ -1529,12 +1607,26 @@ export function generateProject(state: BuilderState): GenFile[] {
   routeLines.push("$router->add('GET', '/health/ready', function ($req) { try { db(); Response::json(['success' => true, 'data' => ['ready' => true]], 200, $req->context()->requestId); } catch (Throwable $e) { Response::error('UNAVAILABLE', 'Database unavailable', 503, [], $req->context()->requestId); } });");
   for (const t of sortedTables) {
     const c = toClassName(t.name) + 'Controller';
-    routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "', fn($req) => $c->get(" + c + "::class)->list($req));");
-    routeLines.push("$router->add('POST', '" + prefix + '/' + t.name + "', fn($req) => $c->get(" + c + "::class)->create($req));");
-    routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->read($req, $p['id']));");
-    routeLines.push("$router->add('PUT', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->update($req, $p['id']));");
-    routeLines.push("$router->add('PATCH', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->patch($req, $p['id']));");
-    routeLines.push("$router->add('DELETE', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->delete($req, $p['id']));");
+    const isUsersResource = t.name.toLowerCase() === 'users' && state.auth.strategy !== 'none';
+
+    if (isUsersResource) {
+      // Users resource: admin-only for list/create/delete, admin-or-self for read/update/patch
+      // Phase 2/3: GET /users is NOT public — requires admin role
+      routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "', function ($req) use ($config, $c) { requireAuth($req, $config); requireRole($req, ['admin']); $c->get(" + c + "::class)->list($req); });");
+      routeLines.push("$router->add('POST', '" + prefix + '/' + t.name + "', function ($req) use ($config, $c) { requireAuth($req, $config); requireRole($req, ['admin']); $c->get(" + c + "::class)->create($req); });");
+      // Admin or self: allow if admin role OR if the route {id} matches the authenticated user's sub claim
+      routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "/{id}', function ($req, $p) use ($config, $c) { requireAuth($req, $config); if (($req->user['role'] ?? '') !== 'admin' && (string)($req->user['sub'] ?? '') !== (string)$p['id']) { Response::error('FORBIDDEN', 'Forbidden', 403, [], $req->context()->requestId); return; } $c->get(" + c + "::class)->read($req, $p['id']); });");
+      routeLines.push("$router->add('PUT', '" + prefix + '/' + t.name + "/{id}', function ($req, $p) use ($config, $c) { requireAuth($req, $config); if (($req->user['role'] ?? '') !== 'admin' && (string)($req->user['sub'] ?? '') !== (string)$p['id']) { Response::error('FORBIDDEN', 'Forbidden', 403, [], $req->context()->requestId); return; } $c->get(" + c + "::class)->update($req, $p['id']); });");
+      routeLines.push("$router->add('PATCH', '" + prefix + '/' + t.name + "/{id}', function ($req, $p) use ($config, $c) { requireAuth($req, $config); if (($req->user['role'] ?? '') !== 'admin' && (string)($req->user['sub'] ?? '') !== (string)$p['id']) { Response::error('FORBIDDEN', 'Forbidden', 403, [], $req->context()->requestId); return; } $c->get(" + c + "::class)->patch($req, $p['id']); });");
+      routeLines.push("$router->add('DELETE', '" + prefix + '/' + t.name + "/{id}', function ($req, $p) use ($config, $c) { requireAuth($req, $config); requireRole($req, ['admin']); $c->get(" + c + "::class)->delete($req, $p['id']); });");
+    } else {
+      routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "', fn($req) => $c->get(" + c + "::class)->list($req));");
+      routeLines.push("$router->add('POST', '" + prefix + '/' + t.name + "', fn($req) => $c->get(" + c + "::class)->create($req));");
+      routeLines.push("$router->add('GET', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->read($req, $p['id']));");
+      routeLines.push("$router->add('PUT', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->update($req, $p['id']));");
+      routeLines.push("$router->add('PATCH', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->patch($req, $p['id']));");
+      routeLines.push("$router->add('DELETE', '" + prefix + '/' + t.name + "/{id}', fn($req, $p) => $c->get(" + c + "::class)->delete($req, $p['id']));");
+    }
   }
 
   // PSR-4 autoloader block
@@ -1584,6 +1676,9 @@ export function generateProject(state: BuilderState): GenFile[] {
   if (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing') {
     frontLines.push("require_once __DIR__ . '/../repositories/UserRepository.php';");
     frontLines.push("require_once __DIR__ . '/../repositories/RefreshTokenRepository.php';");
+    if (state.auth.forgotPassword || state.auth.resetPassword) {
+      frontLines.push("require_once __DIR__ . '/../repositories/PasswordResetTokenRepository.php';");
+    }
     frontLines.push("require_once __DIR__ . '/../services/AuthService.php';");
     frontLines.push("require_once __DIR__ . '/../controllers/AuthController.php';");
   }
@@ -1607,6 +1702,9 @@ export function generateProject(state: BuilderState): GenFile[] {
   if (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing') {
     frontLines.push('use App\\Repositories\\UserRepository;');
     frontLines.push('use App\\Repositories\\RefreshTokenRepository;');
+    if (state.auth.forgotPassword || state.auth.resetPassword) {
+      frontLines.push('use App\\Repositories\\PasswordResetTokenRepository;');
+    }
     frontLines.push('use App\\Services\\AuthService;');
     frontLines.push('use App\\Controllers\\AuthController;');
   }
@@ -1620,8 +1718,14 @@ export function generateProject(state: BuilderState): GenFile[] {
   if (state.auth.strategy !== 'none') {
     frontLines.push("if (($config['jwt_secret'] ?? '') === '' && strpos((string)($_SERVER['REQUEST_URI'] ?? ''), '/health') === false) { /* fail closed on auth routes only — health stays open */ }");
   }
-  frontLines.push("try { db(); } catch (Throwable $e) { Logger::error('db_unavailable', []); Response::error('UNAVAILABLE', 'Database unavailable', 503); exit; }");
-  frontLines.push("Logger::info('request', ['method' => $_SERVER['REQUEST_METHOD'] ?? '', 'path' => parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH)]);");
+  // Lazy DB init: health routes work even when DB is down (Phase 11/12)
+  frontLines.push("$requestPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);");
+  frontLines.push("$isHealthRoute = strpos($requestPath, '/health') === 0;");
+  frontLines.push("$pdo = null;");
+  frontLines.push("if (!$isHealthRoute) {");
+  frontLines.push("    try { $pdo = db(); \\App\\Support\\Model::setConnection($pdo); } catch (Throwable $e) { Logger::error('db_unavailable', []); Response::error('UNAVAILABLE', 'Database unavailable', 503); exit; }");
+  frontLines.push("}");
+  frontLines.push("Logger::info('request', ['method' => $_SERVER['REQUEST_METHOD'] ?? '', 'path' => $requestPath]);");
   if (state.auth.strategy !== 'none') {
     frontLines.push('function requireAuth(Request $req, array $config): void {');
     frontLines.push('    $token = $req->bearer();');
@@ -1641,12 +1745,16 @@ export function generateProject(state: BuilderState): GenFile[] {
   frontLines.push('$router = new Router();');
   frontLines.push('$req = new Request();');
   frontLines.push('$c = Container::getInstance();');
-  frontLines.push('$pdo = db();');
-  frontLines.push('$c->set(PDO::class, fn() => $pdo);');
+  frontLines.push('if ($pdo !== null) { $c->set(PDO::class, fn() => $pdo); }');
   if (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing') {
     frontLines.push('$c->set(UserRepository::class, fn() => new UserRepository($c->get(PDO::class)));');
     frontLines.push('$c->set(RefreshTokenRepository::class, fn() => new RefreshTokenRepository($c->get(PDO::class)));');
-    frontLines.push('$c->set(AuthService::class, fn() => new AuthService($c->get(UserRepository::class), $c->get(RefreshTokenRepository::class), $c->get(PDO::class), $config));');
+    if (state.auth.forgotPassword || state.auth.resetPassword) {
+      frontLines.push('$c->set(PasswordResetTokenRepository::class, fn() => new PasswordResetTokenRepository($c->get(PDO::class)));');
+      frontLines.push('$c->set(AuthService::class, fn() => new AuthService($c->get(UserRepository::class), $c->get(RefreshTokenRepository::class), $c->get(PDO::class), $config, $c->get(PasswordResetTokenRepository::class)));');
+    } else {
+      frontLines.push('$c->set(AuthService::class, fn() => new AuthService($c->get(UserRepository::class), $c->get(RefreshTokenRepository::class), $c->get(PDO::class), $config));');
+    }
     frontLines.push('$c->set(AuthController::class, fn() => new AuthController($c->get(AuthService::class)));');
   }
   for (const t of sortedTables) {
@@ -1664,6 +1772,15 @@ export function generateProject(state: BuilderState): GenFile[] {
     frontLines.push("        'POST " + prefix + "/auth/register',");
     frontLines.push("        'POST " + prefix + "/auth/login',");
     frontLines.push("        'POST " + prefix + "/auth/refresh',");
+    if (state.auth.forgotPassword) {
+      frontLines.push("        'POST " + prefix + "/auth/forgot-password',");
+    }
+    if (state.auth.resetPassword) {
+      frontLines.push("        'POST " + prefix + "/auth/reset-password',");
+    }
+    if (state.auth.emailVerification) {
+      frontLines.push("        'POST " + prefix + "/auth/verify-email',");
+    }
     frontLines.push('    ];');
     frontLines.push('    if (!in_array($req->method . chr(32) . $req->path, $open, true)) { requireAuth($req, $config); }');
     frontLines.push('}');
@@ -1680,9 +1797,16 @@ export function generateProject(state: BuilderState): GenFile[] {
     ? 'CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  user_id BIGINT NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  CONSTRAINT fk_refresh_tokens_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;'
     : '';
 
+  const passwordResetTokensSql = (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing' && (state.auth.forgotPassword || state.auth.resetPassword))
+    ? 'CREATE TABLE IF NOT EXISTS password_reset_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  email VARCHAR(191) NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_prt_token_hash (token_hash),\n  INDEX idx_prt_email (email)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;'
+    : '';
+
   const tableSqls = sortedTables.map((t) => 'CREATE TABLE IF NOT EXISTS ' + t.name + ' (\n' + nljoin(dbColumnsSql(t)) + '\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;');
   if (refreshTokensSql) {
     tableSqls.push(refreshTokensSql);
+  }
+  if (passwordResetTokensSql) {
+    tableSqls.push(passwordResetTokensSql);
   }
   const schemaBody = tableSqls.join('\n\n');
 
@@ -1712,6 +1836,25 @@ export function generateProject(state: BuilderState): GenFile[] {
         '    public function down(PDO $pdo): void\n' +
         '    {\n' +
         '        $pdo->exec("DROP TABLE IF EXISTS refresh_tokens");\n' +
+        '    }\n' +
+        '};\n',
+    });
+  }
+
+  // Password-reset-token storage migration
+  if (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing' && (state.auth.forgotPassword || state.auth.resetPassword)) {
+    const resetMigNum = String(sortedTables.length + 2).padStart(3, '0');
+    files.push({
+      path: `database/migrations/${resetMigNum}_create_password_reset_tokens.php`, language: 'php',
+      content: header('Migration: password_reset_tokens (password recovery verification)') +
+        'return new class {\n' +
+        '    public function up(PDO $pdo): void\n' +
+        '    {\n' +
+        '        $pdo->exec("CREATE TABLE IF NOT EXISTS password_reset_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  email VARCHAR(191) NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_prt_token_hash (token_hash),\n  INDEX idx_prt_email (email)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");\n' +
+        '    }\n\n' +
+        '    public function down(PDO $pdo): void\n' +
+        '    {\n' +
+        '        $pdo->exec("DROP TABLE IF EXISTS password_reset_tokens");\n' +
         '    }\n' +
         '};\n',
     });
@@ -1775,12 +1918,21 @@ export function generateProject(state: BuilderState): GenFile[] {
     "try { if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_URL) BASE = import.meta.env.VITE_API_URL; } catch (e) {}",
     "try { if (!BASE && typeof process !== 'undefined' && process.env && process.env.API_URL) BASE = process.env.API_URL; } catch (e) {}",
     "if (!BASE) BASE = '" + prefix + "';",
-    "var token = '';",
-    "var refreshToken = '';",
-    "try { token = localStorage.getItem('token') || ''; refreshToken = localStorage.getItem('refresh_token') || ''; } catch (e) {}",
-    '',
-    'export function setToken(t) { token = t || ' + "''" + '; try { localStorage.setItem(' + "'token'" + ', token); } catch (e) {} }',
-    'export function setRefreshToken(t) { refreshToken = t || ' + "''" + '; try { localStorage.setItem(' + "'refresh_token'" + ', refreshToken); } catch (e) {} }',
+    ...(state.auth.tokenStorageStrategy === 'local-storage' ? [
+      "var token = '';",
+      "var refreshToken = '';",
+      "try { token = localStorage.getItem('token') || ''; refreshToken = localStorage.getItem('refresh_token') || ''; } catch (e) {}",
+      '',
+      'export function setToken(t) { token = t || ' + "''" + '; try { localStorage.setItem(' + "'token'" + ', token); } catch (e) {} }',
+      'export function setRefreshToken(t) { refreshToken = t || ' + "''" + '; try { localStorage.setItem(' + "'refresh_token'" + ', refreshToken); } catch (e) {} }',
+    ] : [
+      '// Phase 30: Hardened in-memory token storage (zero persistence of refresh token in localStorage)',
+      "var token = '';",
+      "var refreshToken = '';",
+      '',
+      'export function setToken(t) { token = t || ' + "''" + '; }',
+      'export function setRefreshToken(t) { refreshToken = t || ' + "''" + '; }',
+    ]),
     'export function getToken() { return token; }',
     'function storeAuth(d) { var data = (d && d.data) || d || {}; if (data.token) setToken(data.token); if (data.refresh_token) setRefreshToken(data.refresh_token); }',
     '',
@@ -2318,7 +2470,20 @@ export function generateProject(state: BuilderState): GenFile[] {
   // Generated PHPUnit suite: in-process route dispatch execution tests
   files.push({
     path: 'tests/bootstrap.php', language: 'php',
-    content: header('PHPUnit bootstrap') + "$_SERVER['APP_ENV'] = 'testing';\nrequire_once __DIR__ . '/../backend/support/Env.php';\nApp\\Support\\Env::load(dirname(__DIR__));\nrequire_once __DIR__ . '/../backend/config/database.php';\n",
+    content: header('PHPUnit bootstrap — PSR-4 autoloading + testing environment') +
+      "$_SERVER['APP_ENV'] = 'testing';\n" +
+      "spl_autoload_register(function ($class) {\n" +
+      "    $prefix = 'App\\\\';\n" +
+      "    $baseDir = dirname(__DIR__) . '/backend/';\n" +
+      "    $len = strlen($prefix);\n" +
+      "    if (strncmp($prefix, $class, $len) !== 0) return;\n" +
+      "    $relativeClass = substr($class, $len);\n" +
+      "    $file = $baseDir . str_replace('\\\\', '/', $relativeClass) . '.php';\n" +
+      "    if (file_exists($file)) require_once $file;\n" +
+      "});\n" +
+      "require_once __DIR__ . '/../backend/support/Env.php';\n" +
+      "App\\Support\\Env::load(dirname(__DIR__));\n" +
+      "require_once __DIR__ . '/../backend/config/database.php';\n",
   });
   files.push({
     path: 'tests/ApiTest.php', language: 'php',
@@ -2328,7 +2493,15 @@ export function generateProject(state: BuilderState): GenFile[] {
       "use App\\Support\\Router;\n" +
       "use App\\Support\\Request;\n" +
       "use App\\Support\\Response;\n" +
+      (state.auth.strategy !== 'none' ? "use App\\Support\\Jwt;\n" : "") +
       "final class ApiTest extends TestCase\n{\n" +
+      "    public function testContainerServiceResolution(): void {\n" +
+      "        $c = Container::getInstance();\n" +
+      "        $this->assertInstanceOf(Container::class, $c);\n" +
+      "        $c->set('test_service', fn() => 'active');\n" +
+      "        $this->assertTrue($c->has('test_service'));\n" +
+      "        $this->assertEquals('active', $c->get('test_service'));\n" +
+      "    }\n" +
       "    public function testHealthProbesExecuteSuccessfully(): void {\n" +
       "        $this->assertFileExists(__DIR__ . '/../backend/public/index.php');\n" +
       "        $src = file_get_contents(__DIR__ . '/../backend/public/index.php');\n" +
@@ -2337,6 +2510,24 @@ export function generateProject(state: BuilderState): GenFile[] {
       "        $this->assertStringContainsString(\"$router->add('GET', '/health/ready'\", $src);\n" +
       "        $this->assertStringNotContainsString(\"'" + prefix + "/health'\", $src, 'Health routes must not be duplicated under API prefix');\n" +
       "    }\n" +
+      (state.auth.strategy !== 'none' ?
+      "    public function testJwtTokenIssuanceAndVerification(): void {\n" +
+      "        $secret = 'test-secret-at-least-32-characters-long!';\n" +
+      "        $payload = ['sub' => '42', 'role' => 'user'];\n" +
+      "        $token = Jwt::encode($payload, $secret, 3600);\n" +
+      "        $this->assertNotEmpty($token);\n" +
+      "        $decoded = Jwt::decode($token, $secret);\n" +
+      "        $this->assertNotNull($decoded);\n" +
+      "        $this->assertEquals('42', $decoded['sub']);\n" +
+      "        $this->assertEquals('user', $decoded['role']);\n" +
+      "    }\n" +
+      "    public function testExpiredJwtRejected(): void {\n" +
+      "        $secret = 'test-secret-at-least-32-characters-long!';\n" +
+      "        $payload = ['sub' => '42', 'role' => 'user'];\n" +
+      "        $token = Jwt::encode($payload, $secret, -10);\n" +
+      "        $decoded = Jwt::decode($token, $secret);\n" +
+      "        $this->assertNull($decoded, 'Expired JWT must be rejected by Jwt::decode');\n" +
+      "    }\n" : '') +
       (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing' ?
       "    public function testPublicRegistrationImmunityAgainstRoleEscalation(): void {\n" +
       "        $authSrc = file_get_contents(__DIR__ . '/../backend/services/AuthService.php');\n" +

@@ -50,6 +50,7 @@ export interface BuilderAuth {
   permissions: string[];
   tokenExpiryHours: number;
   userDecision?: 'none' | 'add' | 'existing';
+  tokenStorageStrategy?: 'memory' | 'secure-cookie' | 'local-storage';
 }
 
 export interface BuilderConfig {
