@@ -430,5 +430,85 @@ export function runRegressionTests(): RegressionResult[] {
       : 'graph missing real layer representations',
   });
 
+  // 36. PASSWORD_RESET_TOKEN_NOT_EXPOSED — reset_token is never returned in API responses
+  const resetBlog = templateBlog();
+  resetBlog.auth.forgotPassword = true;
+  resetBlog.auth.resetPassword = true;
+  const resetFiles = generateProject(resetBlog);
+  const resetAuthSvc = resetFiles.find((f) => f.path === 'backend/services/AuthService.php')?.content ?? '';
+  const rawTokenNotExposed = !resetAuthSvc.includes("'reset_token' =>") && resetAuthSvc.includes('$this->mailer->sendPasswordReset');
+  out.push({
+    name: 'Password reset token is never exposed in API responses (dispatched via MailProvider)',
+    passed: rawTokenNotExposed,
+    detail: rawTokenNotExposed
+      ? 'clean — reset_token omitted from response, dispatched via MailProvider'
+      : 'raw reset_token leaked in response or mailer dispatch missing',
+  });
+
+  // 37. REFRESH_ROTATION_ATOMIC — refresh token rotation uses FOR UPDATE and marks used
+  const refreshRepoCode = byPath('backend/repositories/RefreshTokenRepository.php');
+  const refreshAtomic = refreshRepoCode.includes('FOR UPDATE') && refreshRepoCode.includes('markUsedAndRevoked');
+  out.push({
+    name: 'Refresh token rotation is concurrency-safe with FOR UPDATE locking',
+    passed: refreshAtomic,
+    detail: refreshAtomic
+      ? 'clean — findActiveByTokenHashForUpdate and markUsedAndRevoked implemented'
+      : 'concurrency locking missing in RefreshTokenRepository',
+  });
+
+  // 38. REFRESH_FAMILY_SUPPORTED — token families tracked and revoked on reuse
+  const familySupported = refreshRepoCode.includes('token_family_id') && refreshRepoCode.includes('revokeFamily');
+  out.push({
+    name: 'Refresh token family tracking and cascade revocation supported',
+    passed: familySupported,
+    detail: familySupported
+      ? 'clean — token_family_id column and revokeFamily method present'
+      : 'token family tracking missing',
+  });
+
+  // 39. FRONTEND_REFRESH_SINGLE_FLIGHT — frontend api-client serializes concurrent refresh attempts
+  const apiClientCode = byPath('frontend/api-client.js');
+  const singleFlightOk = apiClientCode.includes('executeSingleFlightRefresh') || apiClientCode.includes('refreshPromise');
+  out.push({
+    name: 'Frontend API client enforces single-flight token refresh to prevent reuse race conditions',
+    passed: singleFlightOk,
+    detail: singleFlightOk
+      ? 'clean — executeSingleFlightRefresh and refreshPromise lock present'
+      : 'single-flight refresh lock missing in api-client.js',
+  });
+
+  // 40. NO_FALLBACK_QUERY_MASKS_SCHEMA — UserRepository does not mask schema mismatch with fallback
+  const userRepoCode = byPath('backend/repositories/UserRepository.php');
+  const fallbackClean = !/catch\s*\([^)]*\)\s*\{[^}]*INSERT\s+INTO\s+users\s*\([^)]*name,\s*email,\s*password\)/i.test(userRepoCode);
+  out.push({
+    name: 'UserRepository enforces strict schema queries with zero silent try-catch fallbacks',
+    passed: fallbackClean,
+    detail: fallbackClean
+      ? 'clean — strict parameterized INSERT with role, no schema-hiding fallback'
+      : 'silent query fallback detected in UserRepository',
+  });
+
+  // 41. USERS_RESOURCE_ADMIN_OR_SELF_PROTECTED — UserController strips role on mutation
+  const userCtrlCode = byPath('backend/controllers/UserController.php');
+  const userMutationProtected = userCtrlCode.includes("unset($data['role'])") || userCtrlCode.includes("unset($b['role'])");
+  out.push({
+    name: 'UserController strips role parameter to prevent mass-assignment privilege escalation',
+    passed: userMutationProtected,
+    detail: userMutationProtected
+      ? "clean — unset($data['role']) prevents privilege escalation"
+      : 'role mass-assignment permitted in UserController',
+  });
+
+  // 42. PASSWORD_RESET_ATOMIC_FOR_UPDATE — PasswordResetTokenRepository has findByTokenHashForUpdate
+  const prtRepoCode = resetFiles.find((f) => f.path === 'backend/repositories/PasswordResetTokenRepository.php')?.content ?? '';
+  const prtAtomic = prtRepoCode.includes('FOR UPDATE') && prtRepoCode.includes('markUsed');
+  out.push({
+    name: 'Password reset token verification uses FOR UPDATE and records consumption',
+    passed: prtAtomic,
+    detail: prtAtomic
+      ? 'clean — findByTokenHashForUpdate and markUsed present'
+      : 'atomic password reset token locking missing',
+  });
+
   return out;
 }

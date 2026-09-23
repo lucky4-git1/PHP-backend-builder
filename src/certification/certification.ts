@@ -253,6 +253,23 @@ export function generateCertificationReport(input: {
     }
   }
 
+  // Raw reset token exposure hard floor
+  if (generated.some((f) => (f.path.includes('AuthService.php') || f.path.includes('AuthController.php')) && /'reset_token'\s*=>/.test(f.content))) {
+    hardFloorReasons.push('CRITICAL DEFECT: Raw password reset token exposed in response payload');
+  }
+
+  // Schema-hiding query fallback hard floor
+  const userRepoSrc = byPath('backend/repositories/UserRepository.php');
+  if (userRepoSrc && /catch\s*\([^)]*\)\s*\{[^}]*INSERT\s+INTO\s+users\s*\([^)]*name,\s*email,\s*password\)/i.test(userRepoSrc)) {
+    hardFloorReasons.push('CRITICAL DEFECT: UserRepository contains fallback query masking schema drift');
+  }
+
+  // User resource privilege protection hard floor
+  const userCtrlSrc = byPath('backend/controllers/UserController.php');
+  if (userCtrlSrc && /unset\(\$b\['role'\]\)/.test(userCtrlSrc) === false && /\$b\['role'\]/.test(userCtrlSrc)) {
+    hardFloorReasons.push('CRITICAL DEFECT: UserController allows caller-supplied role updates (privilege escalation)');
+  }
+
   // Calculate raw weighted score
   const categories = {
     architecture: { weight: 10, score: archScore, weightedScore: (archScore * 10) / 100, details: archDetails },

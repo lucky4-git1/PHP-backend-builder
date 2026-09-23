@@ -626,6 +626,173 @@ export function auditSecurity(input: AuditInput): SecurityFinding[] {
     }
   }
 
+  // 10. Raw Password Reset Token Exposure Check
+  const anyResetTokenExposed = generated.some((f) =>
+    (f.path.includes('AuthService.php') || f.path.includes('AuthController.php')) &&
+    /'reset_token'\s*=>/.test(f.content)
+  );
+  if (anyResetTokenExposed) {
+    const loc = GeneratedArtifactLocationResolver.resolve(generated, 'backend/services/AuthService.php', "'reset_token'", {
+      ruleId: 'SEC_RAW_RESET_TOKEN_EXPOSURE',
+      generator: 'generator.ts',
+    });
+    out.push(
+      createFinding(
+        projectId,
+        'SEC_RAW_RESET_TOKEN_EXPOSURE',
+        'token_security',
+        'critical',
+        'Raw password reset token exposed in HTTP response',
+        'AuthService or AuthController exposes unhashed reset token directly in the API response JSON.',
+        loc,
+        'Returning raw reset tokens allows unauthenticated callers to immediately hijack password resets.',
+        'Total account takeover without email mailbox access.',
+        {
+          summary: 'Dispatch password reset tokens via email/logging and return only generic status message',
+          steps: [
+            'Remove reset_token key from requestPasswordReset response array',
+            'Dispatch token via MailProvider to user mailbox',
+            'Return generic message: If that email exists, a password reset link has been dispatched.',
+          ],
+          codeExample: "return ['message' => 'If that email exists, a password reset link has been dispatched.'];",
+          automated: true,
+        },
+        {
+          code: GeneratedArtifactLocationResolver.extractEvidence(generated, 'backend/services/AuthService.php', loc.lineStart || 1, 2),
+          ruleEvidence: 'Raw reset token exposed in response payload',
+        },
+        { status: 'open' }
+      )
+    );
+  } else if (generated.some((f) => f.path.includes('PasswordResetTokenRepository.php'))) {
+    const loc = GeneratedArtifactLocationResolver.resolve(generated, 'backend/services/AuthService.php', 'requestPasswordReset', {
+      ruleId: 'SEC_RAW_RESET_TOKEN_EXPOSURE',
+    });
+    out.push(
+      createFinding(
+        projectId,
+        'SEC_RAW_RESET_TOKEN_EXPOSURE',
+        'token_security',
+        'info',
+        'Password reset token safe from response leakage',
+        'Password reset tokens are dispatched through MailProvider and never leaked in HTTP response bodies.',
+        loc,
+        'Token not included in response payload.',
+        'Account takeover prevented.',
+        { summary: 'No action needed.', steps: [], automated: false },
+        { code: GeneratedArtifactLocationResolver.extractEvidence(generated, 'backend/services/AuthService.php', loc.lineStart || 1, 2) },
+        { status: 'verified' }
+      )
+    );
+  }
+
+  // 11. Schema-Drift Fallback Query Check (No Fallback Masks Schema Errors)
+  const userRepo = findFile('backend/repositories/UserRepository.php');
+  if (userRepo) {
+    const hasCatchFallback = /catch\s*\([^)]*\)\s*\{[^}]*INSERT\s+INTO\s+users\s*\([^)]*name,\s*email,\s*password\)/i.test(userRepo.content);
+    if (hasCatchFallback) {
+      const loc = GeneratedArtifactLocationResolver.resolve(generated, 'backend/repositories/UserRepository.php', 'catch', {
+        ruleId: 'SEC_DB_SCHEMA_FALLBACK_QUERY',
+        generator: 'generator.ts',
+      });
+      out.push(
+        createFinding(
+          projectId,
+          'SEC_DB_SCHEMA_FALLBACK_QUERY',
+          'sql_injection',
+          'critical',
+          'Fallback query masks database schema mismatch',
+          'UserRepository suppresses query errors and falls back to legacy columns without role.',
+          loc,
+          'Catching DB exceptions to run fallback queries hides schema drift and causes silent privilege inconsistencies.',
+          'Database errors are hidden; schema migrations cannot be verified.',
+          {
+            summary: 'Remove fallback query and require strict schema alignment',
+            steps: [
+              'Execute direct parameterized query with role',
+              'Let schema errors fail loudly during migrations',
+            ],
+            automated: true,
+          },
+          { code: GeneratedArtifactLocationResolver.extractEvidence(generated, 'backend/repositories/UserRepository.php', loc.lineStart || 1, 3) },
+          { status: 'open' }
+        )
+      );
+    } else {
+      const loc = GeneratedArtifactLocationResolver.resolve(generated, 'backend/repositories/UserRepository.php', 'INSERT INTO users', {
+        ruleId: 'SEC_DB_SCHEMA_FALLBACK_QUERY',
+      });
+      out.push(
+        createFinding(
+          projectId,
+          'SEC_DB_SCHEMA_FALLBACK_QUERY',
+          'sql_injection',
+          'info',
+          'Strict repository schema query execution',
+          'UserRepository executes strict parameterized inserts with no schema-hiding try-catch fallback.',
+          loc,
+          'No fallback query masking schema drift.',
+          'Schema failures are explicit and transparent.',
+          { summary: 'No action needed.', steps: [], automated: false },
+          { code: GeneratedArtifactLocationResolver.extractEvidence(generated, 'backend/repositories/UserRepository.php', loc.lineStart || 1, 2) },
+          { status: 'verified' }
+        )
+      );
+    }
+  }
+
+  // 12. Users Resource Privilege Protection Check
+  const userCtrl = findFile('backend/controllers/UserController.php');
+  if (userCtrl) {
+    const allowsRoleMutation = /unset\(\$b\['role'\]\)/.test(userCtrl.content) === false && /\$b\['role'\]/.test(userCtrl.content);
+    if (allowsRoleMutation) {
+      const loc = GeneratedArtifactLocationResolver.resolve(generated, 'backend/controllers/UserController.php', 'mutate', {
+        ruleId: 'SEC_USERS_RESOURCE_PRIVILEGE_PROTECTION',
+        generator: 'generator.ts',
+      });
+      out.push(
+        createFinding(
+          projectId,
+          'SEC_USERS_RESOURCE_PRIVILEGE_PROTECTION',
+          'authorization',
+          'critical',
+          'Mass-assignment privilege escalation on user update',
+          'UserController allows non-admin callers or general mutate endpoints to overwrite user role.',
+          loc,
+          'Role field in user update body is not stripped.',
+          'Users can elevate their privileges to admin.',
+          {
+            summary: 'Strip role from UserController mutation payload',
+            steps: ["Add unset($b['role']) in UserController::mutate"],
+            automated: true,
+          },
+          { code: GeneratedArtifactLocationResolver.extractEvidence(generated, 'backend/controllers/UserController.php', loc.lineStart || 1, 2) },
+          { status: 'open' }
+        )
+      );
+    } else {
+      const loc = GeneratedArtifactLocationResolver.resolve(generated, 'backend/controllers/UserController.php', 'mutate', {
+        ruleId: 'SEC_USERS_RESOURCE_PRIVILEGE_PROTECTION',
+      });
+      out.push(
+        createFinding(
+          projectId,
+          'SEC_USERS_RESOURCE_PRIVILEGE_PROTECTION',
+          'authorization',
+          'info',
+          'User resource role mutation protected',
+          'UserController strips role parameter to prevent mass-assignment privilege escalation.',
+          loc,
+          'Role attribute immutable via standard user mutations.',
+          'Privilege escalation prevented.',
+          { summary: 'No action needed.', steps: [], automated: false },
+          { code: GeneratedArtifactLocationResolver.extractEvidence(generated, 'backend/controllers/UserController.php', loc.lineStart || 1, 2) },
+          { status: 'verified' }
+        )
+      );
+    }
+  }
+
   return out;
 }
 

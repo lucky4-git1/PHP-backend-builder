@@ -996,6 +996,56 @@ const SUPPORT_HANDLER_LINES: string[] = [
   '}',
 ];
 
+const SUPPORT_MAIL_PROVIDER_LINES: string[] = [
+  '<?php',
+  '/**',
+  ' * Mail Provider Interface & Implementations (Phase 7: Password Reset Email Dispatch)',
+  ' */',
+  '',
+  'declare(strict_types=1);',
+  '',
+  'namespace App\\Support;',
+  '',
+  'interface MailProvider',
+  '{',
+  '    public function sendPasswordReset(string $email, string $resetToken): void;',
+  '}',
+  '',
+  'final class LogMailProvider implements MailProvider',
+  '{',
+  '    public function sendPasswordReset(string $email, string $resetToken): void',
+  '    {',
+  "        Logger::info('mail_password_reset_dispatched', ['email' => $email]);",
+  '    }',
+  '}',
+  '',
+  'final class FakeMailProvider implements MailProvider',
+  '{',
+  '    /** @var array<int, array{email: string, token: string}> */',
+  '    public static array $dispatched = [];',
+  '',
+  '    public function sendPasswordReset(string $email, string $resetToken): void',
+  '    {',
+  "        self::$dispatched[] = ['email' => $email, 'token' => $resetToken];",
+  '    }',
+  '',
+  '    public static function getLastToken(string $email): ?string',
+  '    {',
+  '        for ($i = count(self::$dispatched) - 1; $i >= 0; $i--) {',
+  "            if (self::$dispatched[$i]['email'] === $email) {",
+  "                return self::$dispatched[$i]['token'];",
+  '            }',
+  '        }',
+  '        return null;',
+  '    }',
+  '',
+  '    public static function clear(): void',
+  '    {',
+  '        self::$dispatched = [];',
+  '    }',
+  '}',
+];
+
 function trimSlash(p: string): string {
   return p.endsWith('/') && p.length > 1 ? p.slice(0, -1) : p;
 }
@@ -1024,6 +1074,9 @@ export function generateProject(state: BuilderState): GenFile[] {
 
   if (state.auth.strategy !== 'none') {
     files.push({ path: 'backend/support/Jwt.php', language: 'php', content: SUPPORT_JWT_LINES.join('\n') + '\n' });
+  }
+  if (state.auth.strategy !== 'none' && (state.auth.forgotPassword || state.auth.resetPassword)) {
+    files.push({ path: 'backend/support/MailProvider.php', language: 'php', content: SUPPORT_MAIL_PROVIDER_LINES.join('\n') + '\n' });
   }
 
   files.push({
@@ -1110,13 +1163,8 @@ export function generateProject(state: BuilderState): GenFile[] {
       '',
       "    public function create(string $name, string $email, string $passwordHash, string $role = 'user'): string",
       '    {',
-      '        try {',
-      "            $st = $this->pdo->prepare('INSERT INTO users (name, email, password, role) VALUES (:n, :e, :p, :r)');",
-      "            $st->execute([':n' => $name, ':e' => $email, ':p' => $passwordHash, ':r' => $role]);",
-      '        } catch (\\Throwable $e) {',
-      "            $st = $this->pdo->prepare('INSERT INTO users (name, email, password) VALUES (:n, :e, :p)');",
-      "            $st->execute([':n' => $name, ':e' => $email, ':p' => $passwordHash]);",
-      '        }',
+      "        $st = $this->pdo->prepare('INSERT INTO users (name, email, password, role) VALUES (:n, :e, :p, :r)');",
+      "        $st->execute([':n' => $name, ':e' => $email, ':p' => $passwordHash, ':r' => $role]);",
       '        return (string)$this->pdo->lastInsertId();',
       '    }',
       '',
@@ -1135,19 +1183,19 @@ export function generateProject(state: BuilderState): GenFile[] {
     ];
     files.push({ path: 'backend/repositories/UserRepository.php', language: 'php', content: userRepoLines.join('\n') + '\n' });
 
-    // 2. Refresh Token Repository
+    // 2. Refresh Token Repository (Phases 11 & 12: atomic rotation, family tracking, replay protection)
     const refreshRepoLines: string[] = [
-      header('Repository: Refresh token persistence and rotation', 'App\\Repositories').trimEnd(),
+      header('Repository: Refresh token persistence, atomic rotation, and family tracking', 'App\\Repositories').trimEnd(),
       'use PDO;',
       '',
       'final class RefreshTokenRepository',
       '{',
       '    public function __construct(private PDO $pdo) {}',
       '',
-      '    public function create(string $userId, string $tokenHash, int $ttlDays = 30): void',
+      "    public function create(string $userId, string $tokenHash, string $familyId = '', int $ttlDays = 30): void",
       '    {',
-      "        $st = $this->pdo->prepare('INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES (:u, :h, DATE_ADD(NOW(), INTERVAL :d DAY))');",
-      "        $st->execute([':u' => $userId, ':h' => $tokenHash, ':d' => $ttlDays]);",
+      "        $st = $this->pdo->prepare('INSERT INTO refresh_tokens (user_id, token_hash, token_family_id, expires_at) VALUES (:u, :h, :f, DATE_ADD(NOW(), INTERVAL :d DAY))');",
+      "        $st->execute([':u' => $userId, ':h' => $tokenHash, ':f' => ($familyId !== '' ? $familyId : null), ':d' => $ttlDays]);",
       '    }',
       '',
       '    public function findActiveByTokenHash(string $tokenHash): ?array',
@@ -1158,23 +1206,43 @@ export function generateProject(state: BuilderState): GenFile[] {
       '        return $row ?: null;',
       '    }',
       '',
+      '    public function findActiveByTokenHashForUpdate(string $tokenHash): ?array',
+      '    {',
+      "        $st = $this->pdo->prepare('SELECT rt.*, u.role FROM refresh_tokens rt JOIN users u ON rt.user_id = u.id WHERE rt.token_hash = :h FOR UPDATE');",
+      "        $st->execute([':h' => $tokenHash]);",
+      '        $row = $st->fetch(PDO::FETCH_ASSOC);',
+      '        return $row ?: null;',
+      '    }',
+      '',
+      '    public function markUsedAndRevoked(string $id, string $replacedBy): void',
+      '    {',
+      "        $st = $this->pdo->prepare('UPDATE refresh_tokens SET used_at = NOW(), revoked_at = NOW(), replaced_by = :rep WHERE id = :id');",
+      "        $st->execute([':rep' => $replacedBy, ':id' => $id]);",
+      '    }',
+      '',
+      '    public function revokeFamily(string $familyId): void',
+      '    {',
+      "        $st = $this->pdo->prepare('UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_family_id = :f AND revoked_at IS NULL');",
+      "        $st->execute([':f' => $familyId]);",
+      '    }',
+      '',
       '    public function revokeById(string $id): void',
       '    {',
-      "        $this->pdo->prepare('DELETE FROM refresh_tokens WHERE id = :id')->execute([':id' => $id]);",
+      "        $this->pdo->prepare('UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = :id')->execute([':id' => $id]);",
       '    }',
       '',
       '    public function revokeByHash(string $tokenHash): void',
       '    {',
-      "        $this->pdo->prepare('DELETE FROM refresh_tokens WHERE token_hash = :h')->execute([':h' => $tokenHash]);",
+      "        $this->pdo->prepare('UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = :h')->execute([':h' => $tokenHash]);",
       '    }',
       '}',
     ];
     files.push({ path: 'backend/repositories/RefreshTokenRepository.php', language: 'php', content: refreshRepoLines.join('\n') + '\n' });
 
-    // 2B. Password Reset Token Repository (Phase 5/6: real token verification)
+    // 2B. Password Reset Token Repository (Phases 6, 8, 9: real token verification + concurrency)
     if (state.auth.forgotPassword || state.auth.resetPassword) {
       const resetTokenRepoLines: string[] = [
-        header('Repository: Password reset token persistence — hashed, expiring, one-time use', 'App\\Repositories').trimEnd(),
+        header('Repository: Password reset token persistence — hashed, expiring, one-time use, concurrency-safe', 'App\\Repositories').trimEnd(),
         'use PDO;',
         '',
         'final class PasswordResetTokenRepository',
@@ -1183,7 +1251,7 @@ export function generateProject(state: BuilderState): GenFile[] {
         '',
         '    public function create(string $email, string $tokenHash, int $ttlMinutes = 60): void',
         '    {',
-        "        // Delete any existing tokens for this email (one active token at a time)",
+        "        // Delete any existing unconsumed tokens for this email (one active token at a time)",
         "        $this->pdo->prepare('DELETE FROM password_reset_tokens WHERE email = :e')->execute([':e' => $email]);",
         "        $st = $this->pdo->prepare('INSERT INTO password_reset_tokens (email, token_hash, expires_at) VALUES (:e, :h, DATE_ADD(NOW(), INTERVAL :m MINUTE))');",
         "        $st->execute([':e' => $email, ':h' => $tokenHash, ':m' => $ttlMinutes]);",
@@ -1191,10 +1259,23 @@ export function generateProject(state: BuilderState): GenFile[] {
         '',
         '    public function findByTokenHash(string $tokenHash): ?array',
         '    {',
-        "        $st = $this->pdo->prepare('SELECT * FROM password_reset_tokens WHERE token_hash = :h AND expires_at > NOW() LIMIT 1');",
+        "        $st = $this->pdo->prepare('SELECT * FROM password_reset_tokens WHERE token_hash = :h AND expires_at > NOW() AND used_at IS NULL LIMIT 1');",
         "        $st->execute([':h' => $tokenHash]);",
         '        $row = $st->fetch(PDO::FETCH_ASSOC);',
         '        return $row ?: null;',
+        '    }',
+        '',
+        '    public function findByTokenHashForUpdate(string $tokenHash): ?array',
+        '    {',
+        "        $st = $this->pdo->prepare('SELECT * FROM password_reset_tokens WHERE token_hash = :h AND expires_at > NOW() AND used_at IS NULL LIMIT 1 FOR UPDATE');",
+        "        $st->execute([':h' => $tokenHash]);",
+        '        $row = $st->fetch(PDO::FETCH_ASSOC);',
+        '        return $row ?: null;',
+        '    }',
+        '',
+        '    public function markUsed(string $id): void',
+        '    {',
+        "        $this->pdo->prepare('UPDATE password_reset_tokens SET used_at = NOW() WHERE id = :id')->execute([':id' => $id]);",
         '    }',
         '',
         '    public function deleteByEmail(string $email): void',
@@ -1217,7 +1298,7 @@ export function generateProject(state: BuilderState): GenFile[] {
       header('Service: Authentication business logic, token rotation, and credential verification', 'App\\Services').trimEnd(),
       'use App\\Repositories\\UserRepository;',
       'use App\\Repositories\\RefreshTokenRepository;',
-      ...(hasPasswordReset ? ['use App\\Repositories\\PasswordResetTokenRepository;'] : []),
+      ...(hasPasswordReset ? ['use App\\Repositories\\PasswordResetTokenRepository;', 'use App\\Support\\MailProvider;'] : []),
       'use App\\Support\\Jwt;',
       'use App\\Support\\RequestContext;',
       'use PDO;',
@@ -1230,7 +1311,10 @@ export function generateProject(state: BuilderState): GenFile[] {
       '        private UserRepository $users,',
       '        private RefreshTokenRepository $refreshTokens,',
       '        private PDO $pdo,',
-      '        private array $config,' + (hasPasswordReset ? '\n        private ?PasswordResetTokenRepository $resetTokens = null' : ''),
+      '        private array $config,' +
+        (hasPasswordReset
+          ? '\n        private ?PasswordResetTokenRepository $resetTokens = null,\n        private ?MailProvider $mailer = null'
+          : ''),
       '    ) {}',
       '',
       '    public function register(string $name, string $email, string $password, RequestContext $context): array',
@@ -1308,9 +1392,17 @@ export function generateProject(state: BuilderState): GenFile[] {
       '',
       '        $this->pdo->beginTransaction();',
       '        try {',
-      '            $row = $this->refreshTokens->findActiveByTokenHash($tokenHash);',
+      '            $row = $this->refreshTokens->findActiveByTokenHashForUpdate($tokenHash);',
       '            if (!$row) {',
       '                $this->pdo->rollBack();',
+      "                throw new RuntimeException('Invalid refresh token (reuse detected)');",
+      '            }',
+      '',
+      "            if (!empty($row['revoked_at']) || !empty($row['used_at'])) {",
+      "                if (!empty($row['token_family_id'])) {",
+      "                    $this->refreshTokens->revokeFamily((string)$row['token_family_id']);",
+      '                }',
+      '                $this->pdo->commit();',
       "                throw new RuntimeException('Invalid refresh token (reuse detected)');",
       '            }',
       '',
@@ -1320,12 +1412,16 @@ export function generateProject(state: BuilderState): GenFile[] {
       "                throw new RuntimeException('Expired refresh token');",
       '            }',
       '',
-      '            // Single-use token rotation: revoke old token immediately',
-      "            $this->refreshTokens->revokeById((string)$row['id']);",
+      '            // Single-use token rotation: mark old token consumed and generate replacement',
+      "            $familyId = !empty($row['token_family_id']) ? (string)$row['token_family_id'] : bin2hex(random_bytes(16));",
+      '            $rawNewRefresh = bin2hex(random_bytes(32));',
+      "            $newHash = hash('sha256', $rawNewRefresh);",
+      "            $this->refreshTokens->markUsedAndRevoked((string)$row['id'], $newHash);",
+      "            $this->refreshTokens->create((string)$row['user_id'], $newHash, $familyId);",
       '',
       '            // Re-query current user role from DB to enforce staleness policy',
       "            $role = (string)($row['role'] ?? 'user');",
-      "            $tokens = $this->issueTokens((string)$row['user_id'], $role, $context);",
+      "            $tokens = $this->issueTokens((string)$row['user_id'], $role, $context, $familyId, $rawNewRefresh);",
       '            $this->pdo->commit();',
       '',
       '            return [',
@@ -1347,7 +1443,7 @@ export function generateProject(state: BuilderState): GenFile[] {
       '        }',
       '    }',
       '',
-      '    private function issueTokens(string $userId, string $role, RequestContext $context): array',
+      '    private function issueTokens(string $userId, string $role, RequestContext $context, ?string $familyId = null, ?string $existingRawRefresh = null): array',
       '    {',
       "        $secret = (string)($this->config['jwt_secret'] ?? '');",
       "        if ($secret === '') {",
@@ -1358,9 +1454,14 @@ export function generateProject(state: BuilderState): GenFile[] {
       "        $ttl = (int)($this->config['jwt_ttl'] ?? 3600);",
       "        $access = Jwt::encode(['sub' => $userId, 'role' => $role, 'jti' => $jti], $secret, $ttl);",
       '',
-      '        $rawRefresh = bin2hex(random_bytes(32));',
-      "        $hash = hash('sha256', $rawRefresh);",
-      '        $this->refreshTokens->create($userId, $hash);',
+      '        if ($existingRawRefresh !== null) {',
+      '            $rawRefresh = $existingRawRefresh;',
+      '        } else {',
+      '            $family = $familyId ?? bin2hex(random_bytes(16));',
+      '            $rawRefresh = bin2hex(random_bytes(32));',
+      "            $hash = hash('sha256', $rawRefresh);",
+      '            $this->refreshTokens->create($userId, $hash, $family);',
+      '        }',
       '',
       "        return ['access' => $access, 'refresh' => $rawRefresh];",
       '    }',
@@ -1381,10 +1482,11 @@ export function generateProject(state: BuilderState): GenFile[] {
         '        if ($this->resetTokens !== null) {',
         '            $this->resetTokens->create($email, $tokenHash, 60);',
         '        }',
-        '        return [',
-        "            'message' => 'If that email exists, a password reset link has been dispatched.',",
-        "            'reset_token' => $rawToken,",
-        '        ];',
+        '        // Dispatch reset token via mail provider — NEVER return raw token in API response',
+        '        if ($this->mailer !== null) {',
+        '            $this->mailer->sendPasswordReset($email, $rawToken);',
+        '        }',
+        "        return ['message' => 'If that email exists, a password reset link has been dispatched.'];",
         '    }',
         '',
         '    public function resetPassword(string $email, string $token, string $newPassword, RequestContext $context): array',
@@ -1398,24 +1500,31 @@ export function generateProject(state: BuilderState): GenFile[] {
         "            throw new InvalidArgumentException('Reset token is required');",
         '        }',
         "        $tokenHash = hash('sha256', $token);",
-        '        $record = $this->resetTokens !== null ? $this->resetTokens->findByTokenHash($tokenHash) : null;',
-        "        if (!$record || strtolower((string)$record['email']) !== $email) {",
-        "            throw new RuntimeException('Invalid or expired reset token');",
-        '        }',
-        '        $user = $this->users->findByEmail($email);',
-        '        if (!$user) {',
-        "            throw new RuntimeException('User not found or invalid reset request');",
-        '        }',
-        '        $hash = password_hash($newPassword, PASSWORD_BCRYPT);',
         '        $this->pdo->beginTransaction();',
         '        try {',
+        '            // Atomic: SELECT ... FOR UPDATE prevents concurrent token reuse',
+        '            $record = $this->resetTokens !== null ? $this->resetTokens->findByTokenHashForUpdate($tokenHash) : null;',
+        "            if (!$record || strtolower((string)$record['email']) !== $email) {",
+        '                $this->pdo->rollBack();',
+        "                throw new RuntimeException('Invalid or expired reset token');",
+        '            }',
+        "            if (!empty($record['used_at'])) {",
+        '                $this->pdo->rollBack();',
+        "                throw new RuntimeException('Reset token already consumed');",
+        '            }',
+        '            $user = $this->users->findByEmail($email);',
+        '            if (!$user) {',
+        '                $this->pdo->rollBack();',
+        "                throw new RuntimeException('User not found or invalid reset request');",
+        '            }',
+        '            $hash = password_hash($newPassword, PASSWORD_BCRYPT);',
         '            $updated = $this->users->updatePasswordByEmail($email, $hash);',
         '            if (!$updated) {',
+        '                $this->pdo->rollBack();',
         "                throw new RuntimeException('Failed to update password');",
         '            }',
-        '            if ($this->resetTokens !== null) {',
-        '                $this->resetTokens->deleteByEmail($email);',
-        '            }',
+        '            // Mark token consumed (single-use) instead of bulk delete',
+        "            $this->resetTokens->markUsed((string)$record['id']);",
         '            $this->pdo->commit();',
         "            return ['message' => 'Password reset successful. You may now login.'];",
         '        } catch (\\Throwable $e) {',
@@ -1678,6 +1787,7 @@ export function generateProject(state: BuilderState): GenFile[] {
     frontLines.push("require_once __DIR__ . '/../repositories/RefreshTokenRepository.php';");
     if (state.auth.forgotPassword || state.auth.resetPassword) {
       frontLines.push("require_once __DIR__ . '/../repositories/PasswordResetTokenRepository.php';");
+      frontLines.push("require_once __DIR__ . '/../support/MailProvider.php';");
     }
     frontLines.push("require_once __DIR__ . '/../services/AuthService.php';");
     frontLines.push("require_once __DIR__ . '/../controllers/AuthController.php';");
@@ -1704,6 +1814,8 @@ export function generateProject(state: BuilderState): GenFile[] {
     frontLines.push('use App\\Repositories\\RefreshTokenRepository;');
     if (state.auth.forgotPassword || state.auth.resetPassword) {
       frontLines.push('use App\\Repositories\\PasswordResetTokenRepository;');
+      frontLines.push('use App\\Support\\MailProvider;');
+      frontLines.push('use App\\Support\\LogMailProvider;');
     }
     frontLines.push('use App\\Services\\AuthService;');
     frontLines.push('use App\\Controllers\\AuthController;');
@@ -1751,7 +1863,8 @@ export function generateProject(state: BuilderState): GenFile[] {
     frontLines.push('$c->set(RefreshTokenRepository::class, fn() => new RefreshTokenRepository($c->get(PDO::class)));');
     if (state.auth.forgotPassword || state.auth.resetPassword) {
       frontLines.push('$c->set(PasswordResetTokenRepository::class, fn() => new PasswordResetTokenRepository($c->get(PDO::class)));');
-      frontLines.push('$c->set(AuthService::class, fn() => new AuthService($c->get(UserRepository::class), $c->get(RefreshTokenRepository::class), $c->get(PDO::class), $config, $c->get(PasswordResetTokenRepository::class)));');
+      frontLines.push('$c->set(MailProvider::class, fn() => new LogMailProvider());');
+      frontLines.push('$c->set(AuthService::class, fn() => new AuthService($c->get(UserRepository::class), $c->get(RefreshTokenRepository::class), $c->get(PDO::class), $config, $c->get(PasswordResetTokenRepository::class), $c->get(MailProvider::class)));');
     } else {
       frontLines.push('$c->set(AuthService::class, fn() => new AuthService($c->get(UserRepository::class), $c->get(RefreshTokenRepository::class), $c->get(PDO::class), $config));');
     }
@@ -1794,11 +1907,11 @@ export function generateProject(state: BuilderState): GenFile[] {
 
   // Schema generation in topological order, refresh_tokens placed strictly AFTER users
   const refreshTokensSql = (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing')
-    ? 'CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  user_id BIGINT NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  CONSTRAINT fk_refresh_tokens_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;'
+    ? 'CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  user_id BIGINT NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  token_family_id CHAR(32) NULL,\n  expires_at DATETIME NOT NULL,\n  used_at DATETIME NULL,\n  revoked_at DATETIME NULL,\n  replaced_by CHAR(64) NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_rt_family (token_family_id),\n  CONSTRAINT fk_refresh_tokens_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;'
     : '';
 
   const passwordResetTokensSql = (state.auth.strategy !== 'none' && state.auth.strategy !== 'existing' && (state.auth.forgotPassword || state.auth.resetPassword))
-    ? 'CREATE TABLE IF NOT EXISTS password_reset_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  email VARCHAR(191) NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_prt_token_hash (token_hash),\n  INDEX idx_prt_email (email)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;'
+    ? 'CREATE TABLE IF NOT EXISTS password_reset_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  email VARCHAR(191) NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  used_at DATETIME NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_prt_token_hash (token_hash),\n  INDEX idx_prt_email (email)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;'
     : '';
 
   const tableSqls = sortedTables.map((t) => 'CREATE TABLE IF NOT EXISTS ' + t.name + ' (\n' + nljoin(dbColumnsSql(t)) + '\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;');
@@ -1831,7 +1944,7 @@ export function generateProject(state: BuilderState): GenFile[] {
         'return new class {\n' +
         '    public function up(PDO $pdo): void\n' +
         '    {\n' +
-        '        $pdo->exec("CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  user_id BIGINT NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  CONSTRAINT fk_refresh_tokens_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");\n' +
+        '        $pdo->exec("CREATE TABLE IF NOT EXISTS refresh_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  user_id BIGINT NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  token_family_id CHAR(32) NULL,\n  expires_at DATETIME NOT NULL,\n  used_at DATETIME NULL,\n  revoked_at DATETIME NULL,\n  replaced_by CHAR(64) NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_rt_family (token_family_id),\n  CONSTRAINT fk_refresh_tokens_user_id FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");\n' +
         '    }\n\n' +
         '    public function down(PDO $pdo): void\n' +
         '    {\n' +
@@ -1850,7 +1963,7 @@ export function generateProject(state: BuilderState): GenFile[] {
         'return new class {\n' +
         '    public function up(PDO $pdo): void\n' +
         '    {\n' +
-        '        $pdo->exec("CREATE TABLE IF NOT EXISTS password_reset_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  email VARCHAR(191) NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_prt_token_hash (token_hash),\n  INDEX idx_prt_email (email)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");\n' +
+        '        $pdo->exec("CREATE TABLE IF NOT EXISTS password_reset_tokens (\n  id BIGINT AUTO_INCREMENT NOT NULL,\n  email VARCHAR(191) NOT NULL,\n  token_hash CHAR(64) NOT NULL,\n  expires_at DATETIME NOT NULL,\n  used_at DATETIME NULL,\n  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,\n  PRIMARY KEY (id),\n  INDEX idx_prt_token_hash (token_hash),\n  INDEX idx_prt_email (email)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");\n' +
         '    }\n\n' +
         '    public function down(PDO $pdo): void\n' +
         '    {\n' +
@@ -1936,6 +2049,22 @@ export function generateProject(state: BuilderState): GenFile[] {
     'export function getToken() { return token; }',
     'function storeAuth(d) { var data = (d && d.data) || d || {}; if (data.token) setToken(data.token); if (data.refresh_token) setRefreshToken(data.refresh_token); }',
     '',
+    '// Phase 30: Single-flight refresh lock to prevent concurrent refresh races and replay revocations',
+    'var refreshPromise = null;',
+    'function executeSingleFlightRefresh() {',
+    '  if (!refreshPromise) {',
+    "    refreshPromise = api('/auth/refresh', { method: 'POST', body: { refresh_token: refreshToken }, _retried: true })",
+    '      .then(function (r) {',
+    '        storeAuth(r);',
+    '        return r;',
+    '      })',
+    '      .finally(function () {',
+    '        refreshPromise = null;',
+    '      });',
+    '  }',
+    '  return refreshPromise;',
+    '}',
+    '',
     'export async function api(path, opts) {',
     '  opts = opts || {};',
     "  var method = opts.method || 'GET';",
@@ -1957,7 +2086,14 @@ export function generateProject(state: BuilderState): GenFile[] {
     '    });',
     '    var data = await res.json().catch(function () { return {}; });',
     "    if (res.status === 401 && refreshToken && path !== '/auth/refresh' && !opts._retried) {",
-    "      try { var r = await api('/auth/refresh', { method: 'POST', body: { refresh_token: refreshToken }, _retried: true }); storeAuth(r); h['Authorization'] = 'Bearer ' + token; var res2 = await fetch(BASE + path + (qs ? '?' + qs : ''), { method: method, headers: h, body: body ? JSON.stringify(body) : undefined }); var data2 = await res2.json().catch(function(){ return {}; }); if (!res2.ok) throw Object.assign(new Error(((data2.error||{}).message) || ('HTTP ' + res2.status)), { status: res2.status, code: (data2.error||{}).code, data: data2 }); return data2; } catch (e) { /* refresh failed — fall through */ }",
+    "      try {",
+    "        await executeSingleFlightRefresh();",
+    "        h['Authorization'] = 'Bearer ' + token;",
+    "        var res2 = await fetch(BASE + path + (qs ? '?' + qs : ''), { method: method, headers: h, body: body ? JSON.stringify(body) : undefined });",
+    "        var data2 = await res2.json().catch(function(){ return {}; });",
+    "        if (!res2.ok) throw Object.assign(new Error(((data2.error||{}).message) || ('HTTP ' + res2.status)), { status: res2.status, code: (data2.error||{}).code, data: data2 });",
+    "        return data2;",
+    "      } catch (e) { /* refresh failed — fall through */ }",
     '    }',
     "    if (!res.ok) throw Object.assign(new Error(((data.error||{}).message) || ((data.data||{}).error) || ('HTTP ' + res.status)), { status: res.status, code: (data.error||{}).code, data: data });",
     '    return data;',
