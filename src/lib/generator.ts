@@ -996,6 +996,26 @@ const SUPPORT_HANDLER_LINES: string[] = [
   '}',
 ];
 
+
+const SUPPORT_LOG_MAIL_PROVIDER_LINES: string[] = [
+  '<?php',
+  '/**',
+  ' * Log Mail Provider Implementation (Phase 7: Password Reset Email Dispatch)',
+  ' */',
+  '',
+  'declare(strict_types=1);',
+  '',
+  'namespace App\\Support;',
+  '',
+  'final class LogMailProvider implements MailProvider',
+  '{',
+  '    public function sendPasswordReset(string $email, string $resetToken): void',
+  '    {',
+  "        Logger::info('mail_password_reset_dispatched', ['email' => $email]);",
+  '    }',
+  '}',
+];
+
 const SUPPORT_MAIL_PROVIDER_LINES: string[] = [
   '<?php',
   '/**',
@@ -1077,6 +1097,7 @@ export function generateProject(state: BuilderState): GenFile[] {
   }
   if (state.auth.strategy !== 'none' && (state.auth.forgotPassword || state.auth.resetPassword)) {
     files.push({ path: 'backend/support/MailProvider.php', language: 'php', content: SUPPORT_MAIL_PROVIDER_LINES.join('\n') + '\n' });
+    files.push({ path: 'backend/support/LogMailProvider.php', language: 'php', content: SUPPORT_LOG_MAIL_PROVIDER_LINES.join('\n') + '\n' });
   }
 
   files.push({
@@ -1788,6 +1809,7 @@ export function generateProject(state: BuilderState): GenFile[] {
     if (state.auth.forgotPassword || state.auth.resetPassword) {
       frontLines.push("require_once __DIR__ . '/../repositories/PasswordResetTokenRepository.php';");
       frontLines.push("require_once __DIR__ . '/../support/MailProvider.php';");
+      frontLines.push("require_once __DIR__ . '/../support/LogMailProvider.php';");
     }
     frontLines.push("require_once __DIR__ . '/../services/AuthService.php';");
     frontLines.push("require_once __DIR__ . '/../controllers/AuthController.php';");

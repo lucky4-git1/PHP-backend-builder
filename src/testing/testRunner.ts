@@ -361,11 +361,11 @@ export function simulateAutoloader(generated: Array<GenFile | GeneratedFile>): A
     const content = contentOf(f);
 
     const nsMatch = /namespace\s+([^;]+);/.exec(content);
-    const classMatch = /(?:class|interface|trait)\s+([A-Za-z0-9_]+)/.exec(content);
+    const namespace = nsMatch ? nsMatch[1].trim() : '';
+    const classMatches = [...content.matchAll(/(?:class|interface|trait)\s+([A-Za-z0-9_]+)/g)];
 
-    if (classMatch) {
+    for (const classMatch of classMatches) {
       const className = classMatch[1];
-      const namespace = nsMatch ? nsMatch[1].trim() : '';
       const fqcn = namespace ? `${namespace}\\${className}` : className;
       classMap[fqcn] = path;
 
